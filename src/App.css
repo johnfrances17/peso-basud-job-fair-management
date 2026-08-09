@@ -1300,6 +1300,10 @@ input:disabled {
   font-weight: 500;
 }
 
+.form-section > .attachment-note {
+  margin-top: 8px;
+}
+
 .attachment-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

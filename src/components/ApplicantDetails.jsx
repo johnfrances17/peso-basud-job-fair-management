@@ -111,6 +111,7 @@ export default function ApplicantDetails({ member, authToken }) {
         memberId={member.id}
         authToken={authToken}
         physicalDocuments={member.documents}
+        readOnly
       />
     </div>
   )
