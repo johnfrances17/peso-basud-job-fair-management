@@ -514,20 +514,6 @@ async function findMemberDuplicates({ lastName, firstName, dateOfBirth, mobileNu
   }))
 }
 
-function isSameNormalized(valueA, valueB) {
-  return String(valueA ?? '').trim().toLowerCase() === String(valueB ?? '').trim().toLowerCase()
-}
-
-function isExactDuplicate(candidate, payload) {
-  return (
-    isSameNormalized(candidate.lastName, payload.personal?.lastName)
-    && isSameNormalized(candidate.firstName, payload.personal?.firstName)
-    && String(candidate.dateOfBirth ?? '') === String(toDateValue(payload.personal?.dateOfBirth) ?? '')
-    && isSameNormalized(candidate.mobileNumber, payload.contact?.mobileNumber)
-    && isSameNormalized(candidate.emailAddress, payload.contact?.emailAddress)
-  )
-}
-
 // ---------------------------------------------------------------------------
 // Write helpers (create / update)
 // ---------------------------------------------------------------------------
@@ -721,8 +707,11 @@ app.post('/api/members', requireStaffAuth, async (request, response) => {
     mobileNumber: payload.contact?.mobileNumber,
     emailAddress: payload.contact?.emailAddress,
   })
-  if (existingMatches.some((entry) => isExactDuplicate(entry, payload))) {
-    response.status(409).json({ message: 'A member with these exact details already exists.' })
+  if (existingMatches.length > 0) {
+    response.status(409).json({
+      message: 'Duplicate applicant detected. A record with the same name and birth date, mobile number, or email address already exists.',
+      duplicates: existingMatches,
+    })
     return
   }
 
@@ -743,16 +732,7 @@ app.post('/api/members', requireStaffAuth, async (request, response) => {
   }
 
   const member = await hydrateMemberById(memberId)
-  const duplicates = await findMemberDuplicates({
-    lastName: payload.personal?.lastName,
-    firstName: payload.personal?.firstName,
-    dateOfBirth: payload.personal?.dateOfBirth,
-    mobileNumber: payload.contact?.mobileNumber,
-    emailAddress: payload.contact?.emailAddress,
-    excludeId: memberId,
-  })
-
-  response.status(201).json({ member, duplicates })
+  response.status(201).json({ member })
 })
 
 app.put('/api/members/:id', requireStaffAuth, async (request, response) => {
