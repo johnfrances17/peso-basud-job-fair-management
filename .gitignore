@@ -29,3 +29,6 @@ dist-ssr
 
 .vercel
 .env*.local
+
+# Playwright MCP browser session artifacts
+.playwright-mcp/
