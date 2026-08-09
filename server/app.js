@@ -1,6 +1,9 @@
 import 'dotenv/config'
+import crypto from 'node:crypto'
+import path from 'node:path'
 import express from 'express'
 import cors from 'cors'
+import multer from 'multer'
 import pool from './db.js'
 import {
   createStaffToken,
@@ -10,6 +13,7 @@ import {
   verifyPassword,
 } from './auth.js'
 import { getChildTableInfo, SINGLE_ROW_KEYS } from './queries.js'
+import { deleteAttachment, downloadAttachment, uploadAttachment } from './storage.js'
 
 const app = express()
 
@@ -26,6 +30,45 @@ const specialCategoryMap = {
 }
 
 const documentFields = ['resumeAttached', 'validIdAttached', 'certificateAttached', 'otherDocumentsAttached']
+
+// Digital attachment constraints (multipart uploads).
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+const allowedDocumentTypes = new Set(['resume', 'valid_id', 'certificate', 'other'])
+// mime type -> accepted file extensions
+const allowedFileTypes = new Map([
+  ['image/jpeg', ['jpg', 'jpeg']],
+  ['image/png', ['png']],
+  ['image/webp', ['webp']],
+  ['image/gif', ['gif']],
+  ['application/pdf', ['pdf']],
+  ['application/msword', ['doc']],
+  ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', ['docx']],
+  ['application/vnd.ms-excel', ['xls']],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', ['xlsx']],
+  ['text/plain', ['txt']],
+])
+
+const attachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE_BYTES },
+})
+
+function serializeAttachment(row) {
+  return {
+    id: row.id,
+    documentType: row.document_type,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    fileSize: row.file_size,
+    uploadedBy: row.uploaded_by,
+    createdAt: row.created_at,
+  }
+}
+
+function attachmentSelectSql() {
+  return `SELECT id, document_type, file_name, storage_path, mime_type, file_size, uploaded_by, created_at
+    FROM document_attachments`
+}
 
 const sexValues = new Set(['M', 'F'])
 const civilStatusValues = new Set(['Single', 'Married', 'Widowed', 'Separated'])
@@ -736,9 +779,15 @@ app.delete('/api/members/:id', requireStaffAuth, async (request, response) => {
   }
 
   const client = await pool.connect()
+  let attachmentPaths = []
 
   try {
     await client.query('BEGIN')
+    const attachmentRows = await client.query('SELECT storage_path FROM document_attachments WHERE member_id = $1', [
+      memberId,
+    ])
+    attachmentPaths = attachmentRows.rows.map((row) => row.storage_path)
+
     const deleteResult = await client.query('DELETE FROM members WHERE id = $1', [memberId])
     if (deleteResult.rowCount === 0) {
       await client.query('ROLLBACK')
@@ -753,12 +802,151 @@ app.delete('/api/members/:id', requireStaffAuth, async (request, response) => {
     client.release()
   }
 
+  // Best-effort cleanup of the files in storage (DB rows already cascaded).
+  await Promise.all(attachmentPaths.map((storagePath) => deleteAttachment(storagePath).catch(() => {})))
+
   response.json({ message: 'Member deleted.', deletedId: memberId })
+})
+
+// ---------------------------------------------------------------------------
+// Digital document attachments
+// ---------------------------------------------------------------------------
+
+app.get('/api/members/:id/documents', requireStaffAuth, async (request, response) => {
+  const memberId = toMemberId(request.params.id)
+  if (memberId === null) {
+    response.status(400).json({ message: 'Invalid member id.' })
+    return
+  }
+
+  const member = await findMemberRow(pool, memberId)
+  if (!member) {
+    response.status(404).json({ message: 'Member not found.' })
+    return
+  }
+
+  const result = await pool.query(`${attachmentSelectSql()} WHERE member_id = $1 ORDER BY created_at DESC, id DESC`, [
+    memberId,
+  ])
+  response.json(result.rows.map(serializeAttachment))
+})
+
+app.post('/api/members/:id/documents', requireStaffAuth, attachmentUpload.single('file'), async (request, response) => {
+  const memberId = toMemberId(request.params.id)
+  if (memberId === null) {
+    response.status(400).json({ message: 'Invalid member id.' })
+    return
+  }
+
+  const documentType = request.body?.documentType
+  if (!allowedDocumentTypes.has(documentType)) {
+    response.status(400).json({ message: 'Invalid document type.' })
+    return
+  }
+
+  if (!request.file) {
+    response.status(400).json({ message: 'A file is required.' })
+    return
+  }
+
+  const member = await findMemberRow(pool, memberId)
+  if (!member) {
+    response.status(404).json({ message: 'Member not found.' })
+    return
+  }
+
+  const { buffer, size, mimetype } = request.file
+  const originalName = path.basename(String(request.file.originalname ?? '')).slice(0, 255)
+  const fileExtension = path.extname(originalName).toLowerCase().replace('.', '')
+  const acceptedExtensions = allowedFileTypes.get(mimetype)
+
+  if (!acceptedExtensions || !acceptedExtensions.includes(fileExtension)) {
+    response.status(400).json({ message: 'File type not allowed. Upload a PDF, Word, Excel, text, or image file.' })
+    return
+  }
+
+  const storagePath = `members/${memberId}/${documentType}-${crypto.randomUUID()}.${fileExtension}`
+
+  await uploadAttachment({ storagePath, buffer, contentType: mimetype })
+
+  let inserted
+  try {
+    const insertResult = await pool.query(
+      `INSERT INTO document_attachments (member_id, document_type, file_name, storage_path, mime_type, file_size, uploaded_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, document_type, file_name, mime_type, file_size, uploaded_by, created_at`,
+      [memberId, documentType, originalName, storagePath, mimetype, size, request.staffSession.email],
+    )
+    inserted = insertResult.rows[0]
+  } catch (error) {
+    // Keep DB and storage consistent: drop the file if the row cannot be saved.
+    await deleteAttachment(storagePath).catch(() => {})
+    throw error
+  }
+
+  response.status(201).json({ attachment: serializeAttachment(inserted) })
+})
+
+app.get('/api/members/:id/documents/:attachmentId/download', requireStaffAuth, async (request, response) => {
+  const memberId = toMemberId(request.params.id)
+  const attachmentId = toMemberId(request.params.attachmentId)
+  if (memberId === null || attachmentId === null) {
+    response.status(400).json({ message: 'Invalid member or attachment id.' })
+    return
+  }
+
+  const result = await pool.query(`${attachmentSelectSql()} WHERE id = $1 AND member_id = $2`, [attachmentId, memberId])
+  const attachment = result.rows[0]
+
+  if (!attachment) {
+    response.status(404).json({ message: 'Attachment not found.' })
+    return
+  }
+
+  const fileBuffer = await downloadAttachment(attachment.storage_path)
+
+  response.setHeader('Content-Type', attachment.mime_type)
+  response.setHeader('Content-Length', String(attachment.file_size))
+  response.setHeader(
+    'Content-Disposition',
+    `attachment; filename*=UTF-8''${encodeURIComponent(attachment.file_name)}`,
+  )
+  response.send(fileBuffer)
+})
+
+app.delete('/api/members/:id/documents/:attachmentId', requireStaffAuth, async (request, response) => {
+  const memberId = toMemberId(request.params.id)
+  const attachmentId = toMemberId(request.params.attachmentId)
+  if (memberId === null || attachmentId === null) {
+    response.status(400).json({ message: 'Invalid member or attachment id.' })
+    return
+  }
+
+  const result = await pool.query('SELECT storage_path FROM document_attachments WHERE id = $1 AND member_id = $2', [
+    attachmentId,
+    memberId,
+  ])
+  const attachment = result.rows[0]
+
+  if (!attachment) {
+    response.status(404).json({ message: 'Attachment not found.' })
+    return
+  }
+
+  await pool.query('DELETE FROM document_attachments WHERE id = $1', [attachmentId])
+  await deleteAttachment(attachment.storage_path).catch(() => {})
+
+  response.json({ message: 'Attachment deleted.', deletedId: attachmentId })
 })
 
 // Error handling
 app.use((error, request, response, _next) => {
-  const status = error.status ?? 500
+  let status = error.status ?? 500
+
+  if (error instanceof multer.MulterError) {
+    status = error.code === 'LIMIT_FILE_SIZE' ? 413 : 400
+  }
+
   if (status >= 500) {
     console.error(error)
   }

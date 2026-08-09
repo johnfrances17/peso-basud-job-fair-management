@@ -384,6 +384,7 @@ function App() {
         submitNotice={submitNotice}
         loadingMembers={loadingMembers}
         editingId={editingId}
+        authToken={authToken}
         onClose={closeModal}
         onEdit={openEditModal}
         onDelete={handleDeleteMember}
