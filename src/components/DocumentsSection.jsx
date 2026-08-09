@@ -76,7 +76,7 @@ function UploadIcon() {
   )
 }
 
-export default function DocumentsSection({ memberId, authToken, physicalDocuments = {} }) {
+export default function DocumentsSection({ memberId, authToken, physicalDocuments = {}, readOnly = false }) {
   const [attachments, setAttachments] = useState(() => [])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -206,9 +206,11 @@ export default function DocumentsSection({ memberId, authToken, physicalDocument
                           <button type="button" className="ghost-button attachment-action" onClick={() => handleDownload(attachment)}>
                             Download
                           </button>
-                          <button type="button" className="danger-button attachment-action" onClick={() => handleDelete(attachment)}>
-                            Delete
-                          </button>
+                          {readOnly ? null : (
+                            <button type="button" className="danger-button attachment-action" onClick={() => handleDelete(attachment)}>
+                              Delete
+                            </button>
+                          )}
                         </span>
                       </li>
                     )
@@ -216,19 +218,21 @@ export default function DocumentsSection({ memberId, authToken, physicalDocument
                 </ul>
               ) : null}
 
-              <label className={`file-upload-zone ${isUploading ? 'file-upload-zone-busy' : ''}`}>
-                <span className="file-upload-icon"><UploadIcon /></span>
-                <span className="file-upload-copy">
-                  <strong>{isUploading ? 'Uploading…' : `Upload ${definition.label}`}</strong>
-                  <small>{definition.acceptHint} · Max 10 MB per file</small>
-                </span>
-                <input
-                  type="file"
-                  accept={definition.accept}
-                  disabled={Boolean(uploadingType)}
-                  onChange={(event) => handleUpload(definition.type, event)}
-                />
-              </label>
+              {readOnly ? null : (
+                <label className={`file-upload-zone ${isUploading ? 'file-upload-zone-busy' : ''}`}>
+                  <span className="file-upload-icon"><UploadIcon /></span>
+                  <span className="file-upload-copy">
+                    <strong>{isUploading ? 'Uploading…' : `Upload ${definition.label}`}</strong>
+                    <small>{definition.acceptHint} · Max 10 MB per file</small>
+                  </span>
+                  <input
+                    type="file"
+                    accept={definition.accept}
+                    disabled={Boolean(uploadingType)}
+                    onChange={(event) => handleUpload(definition.type, event)}
+                  />
+                </label>
+              )}
             </div>
           )
         })}

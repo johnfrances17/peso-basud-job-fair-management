@@ -353,7 +353,7 @@ export default function ApplicantForm({ form, editingId, loadingMembers, submitN
             </label>
           ))}
         </div>
-        <p className="fieldset-note">
+        <p className="attachment-note">
           {editingId
             ? 'Mark a document as attached when a physical paper copy has been received. Digital copies can be uploaded below.'
             : 'Mark a document as attached when a physical paper copy has been received. Digital copies can be uploaded after the applicant is saved.'}
