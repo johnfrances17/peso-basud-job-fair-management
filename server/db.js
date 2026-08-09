@@ -44,9 +44,9 @@ const pool = new pg.Pool({
   max: Number(process.env.PG_POOL_MAX ?? 10),
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
-  // Tests pin a dedicated schema (see tests/setup-env.js) so they never touch
-  // production data. Omitted in dev/prod, keeping the default public schema.
-  options: process.env.PGSEARCHPATH ? `-c search_path=${process.env.PGSEARCHPATH}` : undefined,
+  // NOTE: no search_path options here. Schemas are chosen explicitly per
+  // query (see DB_SCHEMA in queries.js / app.js), so a test connection can
+  // never leak its schema into shared pooled backends.
 })
 
 export default pool

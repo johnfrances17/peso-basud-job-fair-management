@@ -1,6 +1,12 @@
 // PostgreSQL data-access definitions for member child tables.
 // One source of truth shared by server/app.js and the test suite.
 
+// Every query is schema-qualified at build time so a leaked search_path on a
+// pooled connection (e.g. a CI job that ran in a test schema) can never
+// redirect reads/writes to the wrong schema. Production stays on `public`.
+export const SCHEMA = process.env.DB_SCHEMA ?? 'public'
+const t = (table) => `${SCHEMA}.${table}`
+
 export const MEMBER_CHILD_TABLES = [
   'member_personal_information',
   'member_contact_information',
@@ -120,9 +126,9 @@ function buildSingleRowSql(table, columns, startingIndex) {
   const placeholders = columns.map((_, index) => `$${startingIndex + index}`)
 
   return {
-    selectSql: `SELECT * FROM ${table} WHERE member_id = $1`,
-    insertSql: `INSERT INTO ${table} (member_id, ${columnNames.join(', ')}) VALUES ($1, ${placeholders.join(', ')})`,
-    upsertSql: `INSERT INTO ${table} (member_id, ${columnNames.join(', ')})
+    selectSql: `SELECT * FROM ${t(table)} WHERE member_id = $1`,
+    insertSql: `INSERT INTO ${t(table)} (member_id, ${columnNames.join(', ')}) VALUES ($1, ${placeholders.join(', ')})`,
+    upsertSql: `INSERT INTO ${t(table)} (member_id, ${columnNames.join(', ')})
       VALUES ($1, ${placeholders.join(', ')})
       ON CONFLICT (member_id) DO UPDATE SET
         ${columns.map(([column]) => `${column} = EXCLUDED.${column}`).join(',\n        ')}`,
@@ -133,9 +139,9 @@ export const MEMBER_CHILD_QUERIES = SINGLE_ROW_KEYS
   .map((key) => buildSingleRowSql(SINGLE_ROW_TABLES[key], COLUMNS[key], 2))
   .map(({ selectSql }) => selectSql)
   .concat([
-    'SELECT * FROM member_addresses WHERE member_id = ANY($1) ORDER BY address_type',
-    'SELECT * FROM member_willing_to_work WHERE member_id = ANY($1) ORDER BY work_scope',
-    'SELECT * FROM member_special_categories WHERE member_id = ANY($1) ORDER BY category_code',
+    `SELECT * FROM ${t('member_addresses')} WHERE member_id = ANY($1) ORDER BY address_type`,
+    `SELECT * FROM ${t('member_willing_to_work')} WHERE member_id = ANY($1) ORDER BY work_scope`,
+    `SELECT * FROM ${t('member_special_categories')} WHERE member_id = ANY($1) ORDER BY category_code`,
   ])
 
 export function getChildTableInfo(key) {

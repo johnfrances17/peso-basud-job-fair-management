@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import request from 'supertest'
 import app from '../server/app.js'
 import pool from '../server/db.js'
+import { SCHEMA } from '../server/queries.js'
 
 function validToken() {
   return request(app)
@@ -62,7 +63,7 @@ describe('POST /api/auth/login', () => {
     expect(response.status).toBe(200)
     expect(response.body.token).toBeTruthy()
 
-    const { rows } = await pool.query('SELECT password_hash FROM staff_accounts WHERE email = $1', [
+    const { rows } = await pool.query(`SELECT password_hash FROM ${SCHEMA}.staff_accounts WHERE email = $1`, [
       'legacy@basud.local',
     ])
 

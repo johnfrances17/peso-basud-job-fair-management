@@ -5,8 +5,9 @@ import pg from 'pg'
 import bcrypt from 'bcryptjs'
 
 // Tests run against a dedicated schema on the same Postgres server as the app
-// (or a local instance), so they never touch production data. The pool in
-// server/db.js points at this schema via PGSEARCHPATH (set in setup-env.js).
+// (or a local instance), so they never touch production data. queries.js and
+// app.js qualify every table with DB_SCHEMA (set in setup-env.js); this setup
+// script creates that schema and loads the schema.sql definitions into it.
 export const TEST_SCHEMA = 'test'
 
 const connectionString = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL

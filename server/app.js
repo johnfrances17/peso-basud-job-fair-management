@@ -17,6 +17,12 @@ import { deleteAttachment, downloadAttachment, uploadAttachment } from './storag
 
 const app = express()
 
+// Every query below is schema-qualified so a leaked search_path on a pooled
+// connection (e.g. a CI job that ran in a test schema) can never redirect
+// reads/writes to the wrong schema. Production stays on `public`.
+const SCHEMA = process.env.DB_SCHEMA ?? 'public'
+const t = (table) => `${SCHEMA}.${table}`
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -67,7 +73,7 @@ function serializeAttachment(row) {
 
 function attachmentSelectSql() {
   return `SELECT id, document_type, file_name, storage_path, mime_type, file_size, uploaded_by, created_at
-    FROM document_attachments`
+    FROM ${t('document_attachments')}`
 }
 
 const sexValues = new Set(['M', 'F'])
@@ -219,7 +225,7 @@ function singleRowInsert(key, memberId, payload) {
   const values = columns.map(([, field]) => normalizeSectionValue(key, field, section[field]))
   const columnNames = columns.map(([column]) => column)
   const placeholders = columns.map((_, index) => `$${index + 2}`)
-  const sql = `INSERT INTO ${table} (member_id, ${columnNames.join(', ')}) VALUES ($1, ${placeholders.join(', ')})`
+  const sql = `INSERT INTO ${t(table)} (member_id, ${columnNames.join(', ')}) VALUES ($1, ${placeholders.join(', ')})`
   return { sql, params: [memberId, ...values] }
 }
 
@@ -229,7 +235,7 @@ function singleRowUpsert(key, memberId, payload) {
   const values = columns.map(([, field]) => normalizeSectionValue(key, field, section[field]))
   const columnNames = columns.map(([column]) => column)
   const placeholders = columns.map((_, index) => `$${index + 2}`)
-  const sql = `INSERT INTO ${table} (member_id, ${columnNames.join(', ')})
+  const sql = `INSERT INTO ${t(table)} (member_id, ${columnNames.join(', ')})
     VALUES ($1, ${placeholders.join(', ')})
     ON CONFLICT (member_id) DO UPDATE SET
       ${columns.map(([column]) => `${column} = EXCLUDED.${column}`).join(', ')}`
@@ -259,12 +265,12 @@ function addressParams(memberId, addressType, address) {
 }
 
 function addressInsertSql() {
-  return `INSERT INTO member_addresses (member_id, address_type, ${ADDRESS_COLUMNS.join(', ')})
+  return `INSERT INTO ${t('member_addresses')} (member_id, address_type, ${ADDRESS_COLUMNS.join(', ')})
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 }
 
 function addressUpsertSql() {
-  return `INSERT INTO member_addresses (member_id, address_type, ${ADDRESS_COLUMNS.join(', ')})
+  return `INSERT INTO ${t('member_addresses')} (member_id, address_type, ${ADDRESS_COLUMNS.join(', ')})
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     ON CONFLICT (member_id, address_type) DO UPDATE SET
       ${ADDRESS_COLUMNS.map((column) => `${column} = EXCLUDED.${column}`).join(', ')}`
@@ -453,7 +459,7 @@ function hydrateMember(memberRow, rowsByTable) {
 async function loadMemberRows(queryable, ids) {
   const results = await Promise.all(
     childSelects.map(({ table }) =>
-      queryable.query(`SELECT * FROM ${table} WHERE member_id = ANY($1)`, [ids]),
+      queryable.query(`SELECT * FROM ${t(table)} WHERE member_id = ANY($1)`, [ids]),
     ),
   )
 
@@ -464,7 +470,7 @@ async function loadMemberRows(queryable, ids) {
 }
 
 async function findMemberRow(queryable, id) {
-  const result = await queryable.query('SELECT id, created_at, updated_at FROM members WHERE id = $1', [id])
+  const result = await queryable.query(`SELECT id, created_at, updated_at FROM ${t('members')} WHERE id = $1`, [id])
   return result.rows[0] ?? null
 }
 
@@ -496,9 +502,9 @@ async function findMemberDuplicates({ lastName, firstName, dateOfBirth, mobileNu
   }
 
   const sql = `SELECT DISTINCT m.id, p.last_name, p.first_name, p.date_of_birth, c.mobile_number, c.email_address
-    FROM members m
-    JOIN member_personal_information p ON p.member_id = m.id
-    JOIN member_contact_information c ON c.member_id = m.id
+    FROM ${t('members')} m
+    JOIN ${t('member_personal_information')} p ON p.member_id = m.id
+    JOIN ${t('member_contact_information')} c ON c.member_id = m.id
     WHERE (${conditions.join(' OR ')})${exclusion}
     ORDER BY m.id
     LIMIT 20`
@@ -531,7 +537,10 @@ async function insertMemberChildren(client, memberId, payload) {
 
   const willingToWork = payload.eligibility?.willingToWork ?? []
   for (const scope of willingToWork) {
-    await client.query('INSERT INTO member_willing_to_work (member_id, work_scope) VALUES ($1, $2)', [memberId, scope])
+    await client.query(`INSERT INTO ${t('member_willing_to_work')} (member_id, work_scope) VALUES ($1, $2)`, [
+      memberId,
+      scope,
+    ])
   }
 
   const categories = Object.entries(payload.specialCategories ?? {})
@@ -540,7 +549,7 @@ async function insertMemberChildren(client, memberId, payload) {
     .filter(Boolean)
 
   for (const code of categories) {
-    await client.query('INSERT INTO member_special_categories (member_id, category_code) VALUES ($1, $2)', [
+    await client.query(`INSERT INTO ${t('member_special_categories')} (member_id, category_code) VALUES ($1, $2)`, [
       memberId,
       code,
     ])
@@ -558,20 +567,23 @@ async function upsertMemberChildren(client, memberId, payload) {
   await client.query(addressUpsertSql(), addressParams(memberId, 'current', current))
   await client.query(addressUpsertSql(), addressParams(memberId, 'permanent', permanent))
 
-  await client.query('DELETE FROM member_willing_to_work WHERE member_id = $1', [memberId])
+  await client.query(`DELETE FROM ${t('member_willing_to_work')} WHERE member_id = $1`, [memberId])
   const willingToWork = payload.eligibility?.willingToWork ?? []
   for (const scope of willingToWork) {
-    await client.query('INSERT INTO member_willing_to_work (member_id, work_scope) VALUES ($1, $2)', [memberId, scope])
+    await client.query(`INSERT INTO ${t('member_willing_to_work')} (member_id, work_scope) VALUES ($1, $2)`, [
+      memberId,
+      scope,
+    ])
   }
 
-  await client.query('DELETE FROM member_special_categories WHERE member_id = $1', [memberId])
+  await client.query(`DELETE FROM ${t('member_special_categories')} WHERE member_id = $1`, [memberId])
   const categories = Object.entries(payload.specialCategories ?? {})
     .filter(([, enabled]) => toBoolean(enabled))
     .map(([field]) => specialCategoryMap[field])
     .filter(Boolean)
 
   for (const code of categories) {
-    await client.query('INSERT INTO member_special_categories (member_id, category_code) VALUES ($1, $2)', [
+    await client.query(`INSERT INTO ${t('member_special_categories')} (member_id, category_code) VALUES ($1, $2)`, [
       memberId,
       code,
     ])
@@ -595,7 +607,7 @@ app.post('/api/auth/login', async (request, response) => {
   }
 
   const result = await pool.query(
-    'SELECT id, email, password_hash, display_name, role, account_status FROM staff_accounts WHERE email = $1 LIMIT 1',
+    `SELECT id, email, password_hash, display_name, role, account_status FROM ${t('staff_accounts')} WHERE email = $1 LIMIT 1`,
     [email],
   )
   const staff = result.rows[0]
@@ -614,7 +626,7 @@ app.post('/api/auth/login', async (request, response) => {
   // Upgrade legacy plaintext records to a bcrypt hash on successful login.
   if (!isBcryptHash(staff.password_hash)) {
     const newHash = await hashPassword(password)
-    await pool.query('UPDATE staff_accounts SET password_hash = $1 WHERE id = $2', [newHash, staff.id])
+    await pool.query(`UPDATE ${t('staff_accounts')} SET password_hash = $1 WHERE id = $2`, [newHash, staff.id])
   }
 
   const token = createStaffToken({ email: staff.email, role: staff.role })
@@ -627,7 +639,7 @@ app.post('/api/auth/login', async (request, response) => {
 })
 
 app.get('/api/auth/me', requireStaffAuth, async (request, response) => {
-  const result = await pool.query('SELECT email, display_name, role FROM staff_accounts WHERE email = $1 LIMIT 1', [
+  const result = await pool.query(`SELECT email, display_name, role FROM ${t('staff_accounts')} WHERE email = $1 LIMIT 1`, [
     request.staffSession.email,
   ])
   const staff = result.rows[0]
@@ -649,7 +661,7 @@ app.post('/api/auth/change-password', requireStaffAuth, async (request, response
   }
 
   const result = await pool.query(
-    'SELECT id, password_hash FROM staff_accounts WHERE email = $1 LIMIT 1',
+    `SELECT id, password_hash FROM ${t('staff_accounts')} WHERE email = $1 LIMIT 1`,
     [request.staffSession.email],
   )
   const staff = result.rows[0]
@@ -660,13 +672,13 @@ app.post('/api/auth/change-password', requireStaffAuth, async (request, response
   }
 
   const newHash = await hashPassword(newPassword)
-  await pool.query('UPDATE staff_accounts SET password_hash = $1 WHERE id = $2', [newHash, staff.id])
+  await pool.query(`UPDATE ${t('staff_accounts')} SET password_hash = $1 WHERE id = $2`, [newHash, staff.id])
 
   response.json({ message: 'Password updated successfully.' })
 })
 
 app.get('/api/members', requireStaffAuth, async (request, response) => {
-  const idsResult = await pool.query('SELECT id, created_at, updated_at FROM members ORDER BY id DESC')
+  const idsResult = await pool.query(`SELECT id, created_at, updated_at FROM ${t('members')} ORDER BY id DESC`)
   const memberRows = idsResult.rows
 
   if (memberRows.length === 0) {
@@ -720,7 +732,7 @@ app.post('/api/members', requireStaffAuth, async (request, response) => {
 
   try {
     await client.query('BEGIN')
-    const insertResult = await client.query('INSERT INTO members DEFAULT VALUES RETURNING id')
+    const insertResult = await client.query(`INSERT INTO ${t('members')} DEFAULT VALUES RETURNING id`)
     memberId = insertResult.rows[0].id
     await insertMemberChildren(client, memberId, payload)
     await client.query('COMMIT')
@@ -749,7 +761,7 @@ app.put('/api/members/:id', requireStaffAuth, async (request, response) => {
 
   try {
     await client.query('BEGIN')
-    const existing = await client.query('SELECT id FROM members WHERE id = $1', [memberId])
+    const existing = await client.query(`SELECT id FROM ${t('members')} WHERE id = $1`, [memberId])
     if (existing.rows.length === 0) {
       await client.query('ROLLBACK')
       response.status(404).json({ message: 'Member not found.' })
@@ -790,12 +802,12 @@ app.delete('/api/members/:id', requireStaffAuth, async (request, response) => {
 
   try {
     await client.query('BEGIN')
-    const attachmentRows = await client.query('SELECT storage_path FROM document_attachments WHERE member_id = $1', [
+    const attachmentRows = await client.query(`SELECT storage_path FROM ${t('document_attachments')} WHERE member_id = $1`, [
       memberId,
     ])
     attachmentPaths = attachmentRows.rows.map((row) => row.storage_path)
 
-    const deleteResult = await client.query('DELETE FROM members WHERE id = $1', [memberId])
+    const deleteResult = await client.query(`DELETE FROM ${t('members')} WHERE id = $1`, [memberId])
     if (deleteResult.rowCount === 0) {
       await client.query('ROLLBACK')
       response.status(404).json({ message: 'Member not found.' })
@@ -879,7 +891,7 @@ app.post('/api/members/:id/documents', requireStaffAuth, attachmentUpload.single
   let inserted
   try {
     const insertResult = await pool.query(
-      `INSERT INTO document_attachments (member_id, document_type, file_name, storage_path, mime_type, file_size, uploaded_by)
+      `INSERT INTO ${t('document_attachments')} (member_id, document_type, file_name, storage_path, mime_type, file_size, uploaded_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, document_type, file_name, mime_type, file_size, uploaded_by, created_at`,
       [memberId, documentType, originalName, storagePath, mimetype, size, request.staffSession.email],
@@ -929,7 +941,7 @@ app.delete('/api/members/:id/documents/:attachmentId', requireStaffAuth, async (
     return
   }
 
-  const result = await pool.query('SELECT storage_path FROM document_attachments WHERE id = $1 AND member_id = $2', [
+  const result = await pool.query(`SELECT storage_path FROM ${t('document_attachments')} WHERE id = $1 AND member_id = $2`, [
     attachmentId,
     memberId,
   ])
@@ -940,7 +952,7 @@ app.delete('/api/members/:id/documents/:attachmentId', requireStaffAuth, async (
     return
   }
 
-  await pool.query('DELETE FROM document_attachments WHERE id = $1', [attachmentId])
+  await pool.query(`DELETE FROM ${t('document_attachments')} WHERE id = $1`, [attachmentId])
   await deleteAttachment(attachment.storage_path).catch(() => {})
 
   response.json({ message: 'Attachment deleted.', deletedId: attachmentId })
