@@ -19,6 +19,7 @@ export default function ApplicantModal({
   onDelete,
   onFieldChange,
   onSubmit,
+  onPendingDocumentsChange,
 }) {
   useEffect(() => {
     if (!open) {
@@ -92,6 +93,13 @@ export default function ApplicantModal({
                   memberId={editingId}
                   authToken={authToken}
                   physicalDocuments={form.documents ?? {}}
+                />
+              ) : mode === 'create' ? (
+                <DocumentsSection
+                  stageMode
+                  authToken={authToken}
+                  physicalDocuments={form.documents ?? {}}
+                  onPendingChange={onPendingDocumentsChange}
                 />
               ) : null}
             </ApplicantForm>

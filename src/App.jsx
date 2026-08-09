@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './App.css'
 import ApplicantModal from './components/ApplicantModal.jsx'
 import DashboardView from './components/DashboardView.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
-import { requestJson } from './lib/api.js'
+import { requestJson, uploadFile } from './lib/api.js'
 import { authStorageKey } from './lib/constants.js'
 import { calculateAge } from './lib/format.js'
 import {
@@ -37,6 +37,7 @@ function App() {
   const [formError, setFormError] = useState('')
   const [modalMode, setModalMode] = useState('create')
   const [activeMember, setActiveMember] = useState(null)
+  const pendingUploadsRef = useRef([])
 
   useEffect(() => {
     setForm((current) => {
@@ -222,6 +223,7 @@ function App() {
   }
 
   function openCreateModal() {
+    pendingUploadsRef.current = []
     setModalMode('create')
     setActiveMember(null)
     setEditingId(null)
@@ -256,6 +258,7 @@ function App() {
   }
 
   function closeModal() {
+    pendingUploadsRef.current = []
     setModalOpen(false)
     setEditingId(null)
     setActiveMember(null)
@@ -298,10 +301,32 @@ function App() {
         return [nextMember, ...currentMembers]
       })
 
+      let uploadNote = ''
+      if (!editingId && pendingUploadsRef.current.length > 0) {
+        const staged = pendingUploadsRef.current
+        pendingUploadsRef.current = []
+        let uploadedCount = 0
+        const failures = []
+        for (const item of staged) {
+          try {
+            await uploadFile(`/api/members/${nextMember.id}/documents`, item.file, authToken, { documentType: item.type })
+            uploadedCount += 1
+          } catch (uploadError) {
+            failures.push(uploadError.message)
+          }
+        }
+        if (uploadedCount > 0) {
+          uploadNote += ` ${uploadedCount} digital document${uploadedCount === 1 ? '' : 's'} attached.`
+        }
+        if (failures.length > 0) {
+          uploadNote += ` ${failures.length} upload${failures.length === 1 ? '' : 's'} failed: ${failures.join('; ')}`
+        }
+      }
+
       setEditingId(null)
       setForm(createEmptyForm())
       setModalOpen(false)
-      setSubmitNotice(response.message || (editingId ? 'Member record updated successfully.' : 'Member record inserted successfully.'))
+      setSubmitNotice((response.message || (editingId ? 'Member record updated successfully.' : 'Member record inserted successfully.')) + uploadNote)
     } catch (error) {
       if (error.message === 'Unauthorized') {
         handleLogout()
@@ -315,6 +340,10 @@ function App() {
 
   function handleLoginFieldChange(field, value) {
     setLoginForm((current) => ({ ...current, [field]: value }))
+  }
+
+  function handlePendingDocumentsChange(list) {
+    pendingUploadsRef.current = list
   }
 
   let screen = null
@@ -398,6 +427,7 @@ function App() {
         onDelete={handleDeleteMember}
         onFieldChange={setSectionField}
         onSubmit={handleSubmit}
+        onPendingDocumentsChange={handlePendingDocumentsChange}
       />
     </>
   )
