@@ -119,30 +119,28 @@ describe('member validation and duplicates', () => {
     expect(response.body.message).toMatch(/willing-to-work/i)
   })
 
-  it('flags a possible duplicate on create', async () => {
+  it('rejects a possible duplicate on create', async () => {
     await login()
 
     const firstResponse = await authorized().post('/api/members').send(minimalMember())
     expect(firstResponse.status).toBe(201)
-    expect(firstResponse.body.duplicates).toHaveLength(0)
 
     // Same name and birth date but a different contact number.
     const duplicateResponse = await authorized().post('/api/members').send(minimalMember({
       contact: { ...minimalMember().contact, mobileNumber: '09178889999' },
     }))
 
-    expect(duplicateResponse.status).toBe(201)
-    expect(duplicateResponse.body.duplicates).toHaveLength(1)
-    expect(duplicateResponse.body.duplicates[0].id).toBe(firstResponse.body.member.id)
+    expect(duplicateResponse.status).toBe(409)
+    expect(duplicateResponse.body.message).toMatch(/already exists/i)
 
-    // Same mobile number on a different person is also flagged.
+    // Same mobile number on a different person is also rejected.
     const mobileDuplicateResponse = await authorized().post('/api/members').send(minimalMember({
       personal: { ...minimalMember().personal, lastName: 'Villanueva', firstName: 'Carla', dateOfBirth: '1990-01-01' },
       contact: { ...minimalMember().contact, mobileNumber: '09178886666' },
     }))
 
-    expect(mobileDuplicateResponse.status).toBe(201)
-    expect(mobileDuplicateResponse.body.duplicates.some((entry) => entry.id === firstResponse.body.member.id)).toBe(true)
+    expect(mobileDuplicateResponse.status).toBe(409)
+    expect(mobileDuplicateResponse.body.message).toMatch(/already exists/i)
   })
 
   it('rejects an exact duplicate payload on create', async () => {
