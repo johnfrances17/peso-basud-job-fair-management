@@ -84,15 +84,15 @@ export default function ApplicantModal({
               onFieldChange={onFieldChange}
               onSubmit={onSubmit}
               onCancel={onClose}
-            />
-          ) : null}
-
-          {mode === 'edit' && editingId ? (
-            <DocumentsSection
-              memberId={editingId}
-              authToken={authToken}
-              physicalDocuments={form.documents ?? {}}
-            />
+            >
+              {mode === 'edit' && editingId ? (
+                <DocumentsSection
+                  memberId={editingId}
+                  authToken={authToken}
+                  physicalDocuments={form.documents ?? {}}
+                />
+              ) : null}
+            </ApplicantForm>
           ) : null}
         </div>
       </section>
