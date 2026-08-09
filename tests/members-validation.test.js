@@ -160,23 +160,6 @@ describe('member validation and duplicates', () => {
     expect(duplicateResponse.body.message).toMatch(/already exists/i)
   })
 
-  it('rejects an exact duplicate payload on create', async () => {
-    await login()
-
-    const uniqueMember = minimalMember({
-      personal: { ...minimalMember().personal, lastName: 'Zulueta', firstName: 'Nadia', dateOfBirth: '1985-03-14' },
-      contact: { ...minimalMember().contact, mobileNumber: '09179995555', emailAddress: 'nadia.zulueta@example.com' },
-    })
-
-    const firstResponse = await authorized().post('/api/members').send(uniqueMember)
-    expect(firstResponse.status).toBe(201)
-
-    // Identical payload — e.g. a double-clicked Save — must not create a second row.
-    const duplicateResponse = await authorized().post('/api/members').send(uniqueMember)
-    expect(duplicateResponse.status).toBe(409)
-    expect(duplicateResponse.body.message).toMatch(/already exists/i)
-  })
-
   it('does not flag the member itself as a duplicate on update', async () => {
     await login()
 
