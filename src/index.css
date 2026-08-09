@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+/* Keep the global stylesheet minimal so App.css owns the page layout.
+   System font stack (Segoe UI first) gives the familiar office look
+   and works fully offline. */
+:root {
+  color-scheme: light;
+  background: #eef1f5;
+}
+
+body {
+  margin: 0;
+}
+
+#root {
+  min-height: 100vh;
+}
