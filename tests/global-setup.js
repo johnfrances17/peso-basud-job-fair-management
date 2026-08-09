@@ -1,40 +1,48 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import mysql from 'mysql2/promise'
+import pg from 'pg'
 import bcrypt from 'bcryptjs'
 
-export const TEST_DB_NAME = 'basud_db_test'
+// Tests run against a dedicated schema on the same Postgres server as the app
+// (or a local instance), so they never touch production data. The pool in
+// server/db.js points at this schema via PGSEARCHPATH (set in setup-env.js).
+export const TEST_SCHEMA = 'test'
 
-const rootConfig = {
-  host: process.env.DB_HOST ?? '127.0.0.1',
-  port: Number(process.env.DB_PORT ?? 3306),
-  user: process.env.DB_USER ?? 'root',
-  password: process.env.DB_PASSWORD ?? '',
-  multipleStatements: true,
+const connectionString = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL
+
+function requiresSsl(value) {
+  return process.env.DATABASE_SSL === 'true' || /supabase\.(co|com)/.test(value ?? '')
 }
 
 export default async function globalSetup() {
-  const connection = await mysql.createConnection(rootConfig)
+  const client = new pg.Client({
+    connectionString,
+    ssl: requiresSsl(connectionString) ? { rejectUnauthorized: false } : undefined,
+  })
 
-  await connection.query(`DROP DATABASE IF EXISTS ${TEST_DB_NAME}`)
-  await connection.query(`CREATE DATABASE ${TEST_DB_NAME}`)
+  await client.connect()
+
+  await client.query(`DROP SCHEMA IF EXISTS ${TEST_SCHEMA} CASCADE`)
+  await client.query(`CREATE SCHEMA ${TEST_SCHEMA}`)
+  await client.query(`SET search_path TO ${TEST_SCHEMA}`)
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url))
-  const schemaPath = path.resolve(__dirname, '..', 'database', 'basud_db.sql')
-  const schemaSql = (await readFile(schemaPath, 'utf8')).replaceAll('basud_db', TEST_DB_NAME)
-  await connection.query(schemaSql)
+  const schemaPath = path.resolve(__dirname, '..', 'database', 'schema.sql')
+  const schemaSql = await readFile(schemaPath, 'utf8')
+  await client.query(schemaSql)
 
   // Staff accounts used by the auth tests. bcrypt rounds kept low for speed.
   const passwordHash = await bcrypt.hash('Basud1234', 4)
   const legacyPlaintext = 'LegacyPass1'
 
-  await connection.query(
-    `INSERT INTO ${TEST_DB_NAME}.staff_accounts
-      (email, password_hash, display_name, role, account_status)
-      VALUES (?, ?, 'Basud Staff', 'staff', 'Active'), (?, ?, 'Inactive Staff', 'staff', 'Inactive'), (?, ?, 'Legacy Staff', 'staff', 'Active')`,
-    ['staff@basud.local', passwordHash, 'inactive@basud.local', passwordHash, 'legacy@basud.local', legacyPlaintext],
+  await client.query(
+    `INSERT INTO staff_accounts (email, password_hash, display_name, role, account_status)
+     VALUES ($1, $2, 'Basud Staff', 'staff', 'Active'),
+            ($3, $2, 'Inactive Staff', 'staff', 'Inactive'),
+            ($4, $5, 'Legacy Staff', 'staff', 'Active')`,
+    ['staff@basud.local', passwordHash, 'inactive@basud.local', 'legacy@basud.local', legacyPlaintext],
   )
 
-  await connection.end()
+  await client.end()
 }

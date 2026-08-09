@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import ApplicantDetails from './ApplicantDetails.jsx'
 import ApplicantForm from './ApplicantForm.jsx'
+import DocumentsSection from './DocumentsSection.jsx'
 
 export default function ApplicantModal({
   open,
@@ -10,7 +11,9 @@ export default function ApplicantModal({
   formError,
   submitNotice,
   loadingMembers,
+  submitting,
   editingId,
+  authToken,
   onClose,
   onEdit,
   onDelete,
@@ -71,18 +74,27 @@ export default function ApplicantModal({
         <div className="modal-body">
           {formError ? <div className="submit-notice error-notice" role="alert">{formError}</div> : null}
 
-          {isViewMode && member ? <ApplicantDetails member={member} /> : null}
+          {isViewMode && member ? <ApplicantDetails member={member} authToken={authToken} /> : null}
 
           {!isViewMode ? (
             <ApplicantForm
               form={form}
               editingId={editingId}
               loadingMembers={loadingMembers}
+              submitting={submitting}
               submitNotice={submitNotice}
               onFieldChange={onFieldChange}
               onSubmit={onSubmit}
               onCancel={onClose}
-            />
+            >
+              {mode === 'edit' && editingId ? (
+                <DocumentsSection
+                  memberId={editingId}
+                  authToken={authToken}
+                  physicalDocuments={form.documents ?? {}}
+                />
+              ) : null}
+            </ApplicantForm>
           ) : null}
         </div>
       </section>

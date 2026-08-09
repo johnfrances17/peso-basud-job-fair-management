@@ -1,6 +1,9 @@
 import 'dotenv/config'
+import crypto from 'node:crypto'
+import path from 'node:path'
 import express from 'express'
 import cors from 'cors'
+import multer from 'multer'
 import pool from './db.js'
 import {
   createStaffToken,
@@ -9,8 +12,14 @@ import {
   requireStaffAuth,
   verifyPassword,
 } from './auth.js'
+import { getChildTableInfo, SINGLE_ROW_KEYS } from './queries.js'
+import { deleteAttachment, downloadAttachment, uploadAttachment } from './storage.js'
 
 const app = express()
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 const specialCategoryMap = {
   fourPsBeneficiary: '4ps',
@@ -20,21 +29,79 @@ const specialCategoryMap = {
   returningOfw: 'returning_ofw',
 }
 
-const reverseSpecialCategoryMap = Object.fromEntries(
-  Object.entries(specialCategoryMap).map(([field, code]) => [code, field]),
-)
-
 const documentFields = ['resumeAttached', 'validIdAttached', 'certificateAttached', 'otherDocumentsAttached']
+
+// Digital attachment constraints (multipart uploads).
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+const allowedDocumentTypes = new Set(['resume', 'valid_id', 'certificate', 'other'])
+// mime type -> accepted file extensions
+const allowedFileTypes = new Map([
+  ['image/jpeg', ['jpg', 'jpeg']],
+  ['image/png', ['png']],
+  ['image/webp', ['webp']],
+  ['image/gif', ['gif']],
+  ['application/pdf', ['pdf']],
+  ['application/msword', ['doc']],
+  ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', ['docx']],
+  ['application/vnd.ms-excel', ['xls']],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', ['xlsx']],
+  ['text/plain', ['txt']],
+])
+
+const attachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE_BYTES },
+})
+
+function serializeAttachment(row) {
+  return {
+    id: row.id,
+    documentType: row.document_type,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    fileSize: row.file_size,
+    uploadedBy: row.uploaded_by,
+    createdAt: row.created_at,
+  }
+}
+
+function attachmentSelectSql() {
+  return `SELECT id, document_type, file_name, storage_path, mime_type, file_size, uploaded_by, created_at
+    FROM document_attachments`
+}
+
+const sexValues = new Set(['M', 'F'])
+const civilStatusValues = new Set(['Single', 'Married', 'Widowed', 'Separated'])
+const willingToWorkValues = new Set([
+  'Within Municipality',
+  'Within Province',
+  'Anywhere in the Philippines',
+  'Overseas',
+])
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? 'http://localhost:5173,http://localhost:3001')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean)
 
+function isOriginAllowed(origin) {
+  if (!origin || allowedOrigins.includes(origin)) {
+    return true
+  }
+  // Entries like "https://*.vercel.app" match any subdomain (Vercel previews).
+  return allowedOrigins.some((entry) => {
+    const wildcardIndex = entry.indexOf('*')
+    if (wildcardIndex === -1) {
+      return false
+    }
+    return origin.length > entry.length - 1 && origin.endsWith(entry.slice(wildcardIndex + 1))
+  })
+}
+
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (isOriginAllowed(origin)) {
         callback(null, true)
         return
       }
@@ -62,1009 +129,855 @@ class InputError extends Error {
   status = 400
 }
 
+// ---------------------------------------------------------------------------
+// Value helpers
+// ---------------------------------------------------------------------------
+
 function toNull(value) {
   if (value === '' || value === undefined || value === null) {
     return null
   }
-
   return value
 }
 
-function toTrimmedString(value) {
-  const nextValue = toNull(value)
-  return nextValue === null ? null : String(nextValue).trim() || null
-}
-
-function toIntegerOrNull(value) {
-  const nextValue = toNull(value)
-  if (nextValue === null) {
-    return null
-  }
-
-  const nextNumber = Number(nextValue)
-  return Number.isFinite(nextNumber) ? nextNumber : null
+function toIntOrNull(value) {
+  return value === '' || value === null || value === undefined ? null : Number.parseInt(value, 10)
 }
 
 function toBoolean(value) {
-  return value === true || value === 1 || value === '1' || value === 'true'
+  return value === true || value === 'true' || value === 1 || value === '1'
 }
 
 function toDateValue(value) {
-  if (value === null || value === undefined || value === '') {
+  if (value instanceof Date || (typeof value === 'string' && value.includes('T'))) {
+    return value
+  }
+  return value ? String(value).slice(0, 10) : null
+}
+
+function toMemberId(rawValue) {
+  if (!/^\d+$/.test(String(rawValue))) {
     return null
   }
+  return Number.parseInt(rawValue, 10)
+}
 
-  if (value instanceof Date) {
-    const year = value.getFullYear()
-    const month = String(value.getMonth() + 1).padStart(2, '0')
-    const day = String(value.getDate()).padStart(2, '0')
-    return `${year}-${month}-${day}`
+// ---------------------------------------------------------------------------
+// Member validation
+// ---------------------------------------------------------------------------
+
+function validateMember(payload) {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new InputError('Request body must be a member object.')
   }
 
-  const nextValue = toTrimmedString(value)
-  return nextValue === null ? null : nextValue.slice(0, 10)
-}
-
-function toInputString(value) {
-  if (value === null || value === undefined) {
-    return ''
-  }
-
-  if (value instanceof Date) {
-    return value.toISOString().slice(0, 10)
-  }
-
-  return String(value)
-}
-
-function emptySpecialCategories() {
-  return Object.keys(specialCategoryMap).reduce((categories, field) => {
-    categories[field] = false
-    return categories
-  }, {})
-}
-
-function emptyDocuments() {
-  return documentFields.reduce((documents, field) => {
-    documents[field] = false
-    return documents
-  }, {})
-}
-
-function parseMemberId(rawValue) {
-  const id = Number(rawValue)
-  return Number.isInteger(id) && id > 0 ? id : null
-}
-
-const civilStatusValues = new Set(['Single', 'Married', 'Widowed', 'Separated'])
-const sexValues = new Set(['M', 'F'])
-const willingToWorkValues = new Set(['Within Municipality', 'Within Province', 'Anywhere in the Philippines', 'Overseas'])
-
-// Required personal fields keep the registry usable: a record without a name
-// cannot be searched or exported.
-function validateMemberPayload(payload) {
-  const personal = payload?.personal ?? {}
-
-  const lastName = toTrimmedString(personal.lastName)
-  const firstName = toTrimmedString(personal.firstName)
-
-  if (!lastName) {
+  const personal = payload.personal ?? {}
+  if (typeof personal !== 'object' || !String(personal.lastName ?? '').trim()) {
     throw new InputError('Last name is required.')
   }
-  if (!firstName) {
+  if (typeof personal !== 'object' || !String(personal.firstName ?? '').trim()) {
     throw new InputError('First name is required.')
   }
-
-  if (personal.sex !== undefined && !sexValues.has(personal.sex)) {
-    throw new InputError('Sex must be either M or F.')
+  if (!sexValues.has(personal.sex)) {
+    throw new InputError('Invalid sex value. Allowed values: M, F.')
+  }
+  if (!civilStatusValues.has(personal.civilStatus)) {
+    throw new InputError('Invalid civil status value.')
   }
 
-  if (personal.civilStatus !== undefined && !civilStatusValues.has(personal.civilStatus)) {
-    throw new InputError('Invalid civil status.')
-  }
-
-  const willingToWork = Array.isArray(payload?.eligibility?.willingToWork)
-    ? payload.eligibility.willingToWork
-    : []
-  for (const workScope of willingToWork) {
-    if (!willingToWorkValues.has(workScope)) {
+  const willingToWork = payload.eligibility?.willingToWork
+  if (willingToWork !== undefined) {
+    if (!Array.isArray(willingToWork) || willingToWork.some((scope) => !willingToWorkValues.has(scope))) {
       throw new InputError('Invalid willing-to-work scope.')
     }
   }
+}
 
-  for (const [field] of Object.entries(specialCategoryMap)) {
-    const selected = payload?.specialCategories?.[field]
-    if (selected !== undefined && typeof selected !== 'boolean') {
-      throw new InputError('Invalid special category value.')
-    }
+// ---------------------------------------------------------------------------
+// Normalization (API payload section -> DB column values)
+// ---------------------------------------------------------------------------
+
+function normalizeSectionValue(key, field, value) {
+  if (key === 'documents' && documentFields.includes(field)) {
+    return toBoolean(value)
+  }
+  if (key === 'personal' && field === 'dateOfBirth') {
+    return toDateValue(value)
+  }
+  if (key === 'personal' && field === 'age') {
+    return toIntOrNull(value)
+  }
+  if (key === 'employment' && field === 'yearsOfExperience') {
+    return toNull(value)
+  }
+  return toNull(value)
+}
+
+function singleRowInsert(key, memberId, payload) {
+  const { table, columns } = getChildTableInfo(key)
+  const section = payload[key] ?? {}
+  const values = columns.map(([, field]) => normalizeSectionValue(key, field, section[field]))
+  const columnNames = columns.map(([column]) => column)
+  const placeholders = columns.map((_, index) => `$${index + 2}`)
+  const sql = `INSERT INTO ${table} (member_id, ${columnNames.join(', ')}) VALUES ($1, ${placeholders.join(', ')})`
+  return { sql, params: [memberId, ...values] }
+}
+
+function singleRowUpsert(key, memberId, payload) {
+  const { table, columns } = getChildTableInfo(key)
+  const section = payload[key] ?? {}
+  const values = columns.map(([, field]) => normalizeSectionValue(key, field, section[field]))
+  const columnNames = columns.map(([column]) => column)
+  const placeholders = columns.map((_, index) => `$${index + 2}`)
+  const sql = `INSERT INTO ${table} (member_id, ${columnNames.join(', ')})
+    VALUES ($1, ${placeholders.join(', ')})
+    ON CONFLICT (member_id) DO UPDATE SET
+      ${columns.map(([column]) => `${column} = EXCLUDED.${column}`).join(', ')}`
+  return { sql, params: [memberId, ...values] }
+}
+
+const ADDRESS_COLUMNS = [
+  'same_as_current',
+  'house_no_street',
+  'barangay',
+  'municipality_city',
+  'province',
+  'zip_code',
+]
+
+function addressParams(memberId, addressType, address) {
+  return [
+    memberId,
+    addressType,
+    toBoolean(address?.sameAsCurrent ?? false),
+    toNull(address?.houseNoStreet),
+    toNull(address?.barangay),
+    toNull(address?.municipalityCity),
+    toNull(address?.province),
+    toNull(address?.zipCode),
+  ]
+}
+
+function addressInsertSql() {
+  return `INSERT INTO member_addresses (member_id, address_type, ${ADDRESS_COLUMNS.join(', ')})
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+}
+
+function addressUpsertSql() {
+  return `INSERT INTO member_addresses (member_id, address_type, ${ADDRESS_COLUMNS.join(', ')})
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    ON CONFLICT (member_id, address_type) DO UPDATE SET
+      ${ADDRESS_COLUMNS.map((column) => `${column} = EXCLUDED.${column}`).join(', ')}`
+}
+
+function normalizeAddresses(payload) {
+  const current = payload.currentAddress ?? {}
+  const permanentRaw = payload.permanentAddress ?? {}
+  const sameAsCurrent = toBoolean(permanentRaw.sameAsCurrent)
+
+  return {
+    current,
+    permanent: sameAsCurrent ? { ...current, sameAsCurrent: true } : { ...permanentRaw, sameAsCurrent: false },
   }
 }
 
-// Finds records that may be the same person, so staff can confirm before
-// creating a duplicate registry entry. Matches on full name + birth date,
-// mobile number, or email address.
-async function findMemberDuplicates(candidate, excludeId = null) {
-  const personal = candidate?.personal ?? {}
-  const contact = candidate?.contact ?? {}
+// ---------------------------------------------------------------------------
+// Member hydration (DB rows -> API member object)
+// ---------------------------------------------------------------------------
 
-  const lastName = toTrimmedString(personal.lastName)
-  const firstName = toTrimmedString(personal.firstName)
-  const dateOfBirth = toDateValue(personal.dateOfBirth)
-  const mobileNumber = toTrimmedString(contact.mobileNumber)
-  const emailAddress = toTrimmedString(contact.emailAddress)?.toLowerCase()
+const childSelects = [
+  { table: 'member_personal_information', key: 'personal' },
+  { table: 'member_contact_information', key: 'contact' },
+  { table: 'member_government_information', key: 'government' },
+  { table: 'member_employment_eligibility', key: 'eligibility' },
+  { table: 'member_pwd_information', key: 'pwd' },
+  { table: 'member_emergency_contacts', key: 'emergency' },
+  { table: 'member_educational_background', key: 'education' },
+  { table: 'member_employment_information', key: 'employment' },
+  { table: 'member_skills', key: 'skills' },
+  { table: 'member_documents', key: 'documents' },
+  { table: 'member_addresses', key: 'addresses' },
+  { table: 'member_willing_to_work', key: 'willingToWork' },
+  { table: 'member_special_categories', key: 'specialCategories' },
+]
 
-  const conditions = []
-  const values = []
+function mapCamel(row, pairs) {
+  return pairs.reduce((acc, [column, field]) => {
+    acc[field] = row[column]
+    return acc
+  }, {})
+}
 
-  if (lastName && firstName) {
-    conditions.push(
-      '(last_name = ? AND first_name = ? AND date_of_birth IS NOT NULL AND date_of_birth = ?)',
-    )
-    values.push(lastName, firstName, dateOfBirth)
+function hydrateMember(memberRow, rowsByTable) {
+  const getRow = (table) => rowsByTable[table]?.find((row) => row.member_id === memberRow.id)
+
+  const personalRow = getRow('member_personal_information')
+  const contactRow = getRow('member_contact_information')
+  const governmentRow = getRow('member_government_information')
+  const eligibilityRow = getRow('member_employment_eligibility')
+  const pwdRow = getRow('member_pwd_information')
+  const emergencyRow = getRow('member_emergency_contacts')
+  const educationRow = getRow('member_educational_background')
+  const employmentRow = getRow('member_employment_information')
+  const skillsRow = getRow('member_skills')
+  const documentsRow = getRow('member_documents')
+
+  const addressRows = (rowsByTable['member_addresses'] ?? []).filter((row) => row.member_id === memberRow.id)
+  const currentAddressRow = addressRows.find((row) => row.address_type === 'current')
+  const permanentAddressRow = addressRows.find((row) => row.address_type === 'permanent')
+
+  const willingToWorkRows = (rowsByTable['member_willing_to_work'] ?? []).filter(
+    (row) => row.member_id === memberRow.id,
+  )
+  const specialCategoryRows = (rowsByTable['member_special_categories'] ?? []).filter(
+    (row) => row.member_id === memberRow.id,
+  )
+  const specialCategoryCodesForMember = new Set(specialCategoryRows.map((row) => row.category_code))
+
+  const mapAddress = (row) => mapCamel(row, [
+    ['house_no_street', 'houseNoStreet'],
+    ['barangay', 'barangay'],
+    ['municipality_city', 'municipalityCity'],
+    ['province', 'province'],
+    ['zip_code', 'zipCode'],
+  ])
+
+  return {
+    id: memberRow.id,
+    createdAt: memberRow.created_at,
+    updatedAt: memberRow.updated_at,
+    personal: personalRow
+      ? mapCamel(personalRow, [
+          ['last_name', 'lastName'],
+          ['first_name', 'firstName'],
+          ['middle_name', 'middleName'],
+          ['suffix', 'suffix'],
+          ['sex', 'sex'],
+          ['date_of_birth', 'dateOfBirth'],
+          ['place_of_birth', 'placeOfBirth'],
+          ['age', 'age'],
+          ['civil_status', 'civilStatus'],
+          ['nationality', 'nationality'],
+          ['religion', 'religion'],
+        ])
+      : {},
+    contact: contactRow
+      ? mapCamel(contactRow, [
+          ['mobile_number', 'mobileNumber'],
+          ['email_address', 'emailAddress'],
+          ['facebook_profile', 'facebookProfile'],
+        ])
+      : {},
+    currentAddress: currentAddressRow ? mapAddress(currentAddressRow) : {},
+    permanentAddress: permanentAddressRow
+      ? { sameAsCurrent: permanentAddressRow.same_as_current, ...mapAddress(permanentAddressRow) }
+      : { sameAsCurrent: true },
+    government: governmentRow
+      ? mapCamel(governmentRow, [
+          ['philsys_national_id_number', 'philSysNationalIdNumber'],
+          ['sss_number', 'sssNumber'],
+          ['philhealth_number', 'philHealthNumber'],
+          ['pagibig_number', 'pagibigNumber'],
+          ['tin_number', 'tinNumber'],
+          ['passport_number', 'passportNumber'],
+        ])
+      : {},
+    eligibility: eligibilityRow
+      ? {
+          ...mapCamel(eligibilityRow, [
+            ['legally_eligible', 'legallyEligible'],
+            ['valid_government_id', 'validGovernmentId'],
+          ]),
+          willingToWork: willingToWorkRows.map((row) => row.work_scope),
+        }
+      : { legallyEligible: '', validGovernmentId: '', willingToWork: [] },
+    pwd: pwdRow
+      ? mapCamel(pwdRow, [
+          ['is_person_with_disability', 'isPersonWithDisability'],
+          ['disability_type', 'disabilityType'],
+        ])
+      : {},
+    specialCategories: {
+      fourPsBeneficiary: specialCategoryCodesForMember.has('4ps'),
+      indigenousPeople: specialCategoryCodesForMember.has('indigenous_people'),
+      soloParent: specialCategoryCodesForMember.has('solo_parent'),
+      seniorCitizen: specialCategoryCodesForMember.has('senior_citizen'),
+      returningOfw: specialCategoryCodesForMember.has('returning_ofw'),
+    },
+    emergency: emergencyRow
+      ? mapCamel(emergencyRow, [
+          ['full_name', 'fullName'],
+          ['relationship', 'relationship'],
+          ['contact_number', 'contactNumber'],
+          ['address', 'address'],
+        ])
+      : {},
+    education: educationRow
+      ? mapCamel(educationRow, [
+          ['highest_educational_attainment', 'highestEducationalAttainment'],
+          ['school_name', 'schoolName'],
+          ['course_program', 'courseProgram'],
+          ['year_graduated', 'yearGraduated'],
+          ['honors_awards', 'honorsAwards'],
+        ])
+      : {},
+    employment: employmentRow
+      ? mapCamel(employmentRow, [
+          ['employment_status', 'employmentStatus'],
+          ['desired_position', 'desiredPosition'],
+          ['preferred_industry', 'preferredIndustry'],
+          ['expected_salary', 'expectedSalary'],
+          ['years_of_experience', 'yearsOfExperience'],
+        ])
+      : {},
+    skills: skillsRow
+      ? mapCamel(skillsRow, [
+          ['technical_skills', 'technicalSkills'],
+          ['soft_skills', 'softSkills'],
+          ['language_spoken', 'languageSpoken'],
+          ['computer_skills', 'computerSkills'],
+          ['certifications_license', 'certificationsLicense'],
+        ])
+      : {},
+    documents: documentsRow
+      ? mapCamel(documentsRow, [
+          ['resume_attached', 'resumeAttached'],
+          ['valid_id_attached', 'validIdAttached'],
+          ['certificate_attached', 'certificateAttached'],
+          ['other_documents_attached', 'otherDocumentsAttached'],
+        ])
+      : {},
+  }
+}
+
+async function loadMemberRows(queryable, ids) {
+  const results = await Promise.all(
+    childSelects.map(({ table }) =>
+      queryable.query(`SELECT * FROM ${table} WHERE member_id = ANY($1)`, [ids]),
+    ),
+  )
+
+  return childSelects.reduce((acc, { table }, index) => {
+    acc[table] = results[index].rows
+    return acc
+  }, {})
+}
+
+async function findMemberRow(queryable, id) {
+  const result = await queryable.query('SELECT id, created_at, updated_at FROM members WHERE id = $1', [id])
+  return result.rows[0] ?? null
+}
+
+async function hydrateMemberById(id) {
+  const memberRow = await findMemberRow(pool, id)
+  if (!memberRow) {
+    return null
+  }
+  const rowsByTable = await loadMemberRows(pool, [id])
+  return hydrateMember(memberRow, rowsByTable)
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate detection
+// ---------------------------------------------------------------------------
+
+async function findMemberDuplicates({ lastName, firstName, dateOfBirth, mobileNumber, emailAddress, excludeId }) {
+  const conditions = [
+    '(p.last_name = $1 AND p.first_name = $2 AND p.date_of_birth = $3)',
+    '(c.mobile_number IS NOT NULL AND c.mobile_number <> \'\' AND c.mobile_number = $4)',
+    '(c.email_address IS NOT NULL AND c.email_address <> \'\' AND LOWER(c.email_address) = LOWER($5))',
+  ]
+  const params = [lastName, firstName, toDateValue(dateOfBirth), toNull(mobileNumber), toNull(emailAddress)]
+
+  let exclusion = ''
+  if (excludeId !== undefined && excludeId !== null) {
+    exclusion = ' AND m.id <> $6'
+    params.push(excludeId)
   }
 
-  if (mobileNumber) {
-    conditions.push('mobile_number = ?')
-    values.push(mobileNumber)
-  }
-
-  if (emailAddress) {
-    conditions.push('LOWER(email_address) = ?')
-    values.push(emailAddress)
-  }
-
-  if (conditions.length === 0) {
-    return []
-  }
-
-  const query = `
-    SELECT m.id, m.created_at, mp.last_name, mp.first_name, mp.middle_name,
-           mp.date_of_birth, mc.mobile_number, mc.email_address
+  const sql = `SELECT DISTINCT m.id, p.last_name, p.first_name, p.date_of_birth, c.mobile_number, c.email_address
     FROM members m
-    JOIN member_personal_information mp ON mp.member_id = m.id
-    LEFT JOIN member_contact_information mc ON mc.member_id = m.id
-    WHERE (${conditions.join(' OR ')})
-    ORDER BY m.id DESC
-  `
+    JOIN member_personal_information p ON p.member_id = m.id
+    JOIN member_contact_information c ON c.member_id = m.id
+    WHERE (${conditions.join(' OR ')})${exclusion}
+    ORDER BY m.id
+    LIMIT 20`
 
-  const [rows] = await pool.query(query, values)
-
-  return rows
-    .filter((row) => row.id !== excludeId)
-    .map((row) => ({
-      id: row.id,
-      createdAt: row.created_at,
-      lastName: toInputString(row.last_name),
-      firstName: toInputString(row.first_name),
-      middleName: toInputString(row.middle_name),
-      dateOfBirth: toDateValue(row.date_of_birth),
-      mobileNumber: toInputString(row.mobile_number),
-      emailAddress: toInputString(row.email_address),
-    }))
+  const result = await pool.query(sql, params)
+  return result.rows.map((row) => ({
+    id: row.id,
+    lastName: row.last_name,
+    firstName: row.first_name,
+    dateOfBirth: row.date_of_birth,
+    mobileNumber: row.mobile_number,
+    emailAddress: row.email_address,
+  }))
 }
+
+function isSameNormalized(valueA, valueB) {
+  return String(valueA ?? '').trim().toLowerCase() === String(valueB ?? '').trim().toLowerCase()
+}
+
+function isExactDuplicate(candidate, payload) {
+  return (
+    isSameNormalized(candidate.lastName, payload.personal?.lastName)
+    && isSameNormalized(candidate.firstName, payload.personal?.firstName)
+    && String(candidate.dateOfBirth ?? '') === String(toDateValue(payload.personal?.dateOfBirth) ?? '')
+    && isSameNormalized(candidate.mobileNumber, payload.contact?.mobileNumber)
+    && isSameNormalized(candidate.emailAddress, payload.contact?.emailAddress)
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Write helpers (create / update)
+// ---------------------------------------------------------------------------
+
+async function insertMemberChildren(client, memberId, payload) {
+  const { current, permanent } = normalizeAddresses(payload)
+
+  for (const key of SINGLE_ROW_KEYS) {
+    const { sql, params } = singleRowInsert(key, memberId, payload)
+    await client.query(sql, params)
+  }
+
+  await client.query(addressInsertSql(), addressParams(memberId, 'current', current))
+  await client.query(addressInsertSql(), addressParams(memberId, 'permanent', permanent))
+
+  const willingToWork = payload.eligibility?.willingToWork ?? []
+  for (const scope of willingToWork) {
+    await client.query('INSERT INTO member_willing_to_work (member_id, work_scope) VALUES ($1, $2)', [memberId, scope])
+  }
+
+  const categories = Object.entries(payload.specialCategories ?? {})
+    .filter(([, enabled]) => toBoolean(enabled))
+    .map(([field]) => specialCategoryMap[field])
+    .filter(Boolean)
+
+  for (const code of categories) {
+    await client.query('INSERT INTO member_special_categories (member_id, category_code) VALUES ($1, $2)', [
+      memberId,
+      code,
+    ])
+  }
+}
+
+async function upsertMemberChildren(client, memberId, payload) {
+  const { current, permanent } = normalizeAddresses(payload)
+
+  for (const key of SINGLE_ROW_KEYS) {
+    const { sql, params } = singleRowUpsert(key, memberId, payload)
+    await client.query(sql, params)
+  }
+
+  await client.query(addressUpsertSql(), addressParams(memberId, 'current', current))
+  await client.query(addressUpsertSql(), addressParams(memberId, 'permanent', permanent))
+
+  await client.query('DELETE FROM member_willing_to_work WHERE member_id = $1', [memberId])
+  const willingToWork = payload.eligibility?.willingToWork ?? []
+  for (const scope of willingToWork) {
+    await client.query('INSERT INTO member_willing_to_work (member_id, work_scope) VALUES ($1, $2)', [memberId, scope])
+  }
+
+  await client.query('DELETE FROM member_special_categories WHERE member_id = $1', [memberId])
+  const categories = Object.entries(payload.specialCategories ?? {})
+    .filter(([, enabled]) => toBoolean(enabled))
+    .map(([field]) => specialCategoryMap[field])
+    .filter(Boolean)
+
+  for (const code of categories) {
+    await client.query('INSERT INTO member_special_categories (member_id, category_code) VALUES ($1, $2)', [
+      memberId,
+      code,
+    ])
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
+app.get('/api/health', (request, response) => {
+  response.json({ status: 'ok' })
+})
 
 app.post('/api/auth/login', async (request, response) => {
-  const email = toTrimmedString(request.body?.email)?.toLowerCase()
-  const password = toTrimmedString(request.body?.password)
+  const { email, password } = request.body ?? {}
 
   if (!email || !password) {
     response.status(400).json({ message: 'Email and password are required.' })
     return
   }
 
-  try {
-    const [rows] = await pool.query(
-      'SELECT id, email, password_hash, display_name, role, account_status FROM staff_accounts WHERE email = ? LIMIT 1',
-      [email],
-    )
+  const result = await pool.query(
+    'SELECT id, email, password_hash, display_name, role, account_status FROM staff_accounts WHERE email = $1 LIMIT 1',
+    [email],
+  )
+  const staff = result.rows[0]
 
-    const staff = rows[0]
-
-    if (!staff || staff.account_status !== 'Active') {
-      response.status(401).json({ message: 'Invalid staff credentials.' })
-      return
-    }
-
-    const isValid = await verifyPassword(password, staff.password_hash)
-    if (!isValid) {
-      response.status(401).json({ message: 'Invalid staff credentials.' })
-      return
-    }
-
-    // Upgrade legacy plaintext passwords to bcrypt on first successful login.
-    if (!isBcryptHash(staff.password_hash)) {
-      const newHash = await hashPassword(password)
-      await pool.query('UPDATE staff_accounts SET password_hash = ? WHERE id = ?', [newHash, staff.id]).catch((error) => {
-        console.warn('[auth] Failed to rehash legacy password for', staff.email, error)
-      })
-    }
-
-    response.json({
-      message: 'Signed in successfully.',
-      token: createStaffToken({ email: staff.email, role: staff.role }),
-      staff: {
-        email: staff.email,
-        displayName: staff.display_name,
-        role: staff.role,
-      },
-    })
-  } catch (error) {
-    console.error('[auth] Login failed.', error)
-    response.status(500).json({ message: 'Failed to sign in.' })
+  if (!staff || staff.account_status !== 'Active') {
+    response.status(401).json({ message: 'Invalid staff credentials.' })
+    return
   }
+
+  const passwordMatches = await verifyPassword(password, staff.password_hash)
+  if (!passwordMatches) {
+    response.status(401).json({ message: 'Invalid staff credentials.' })
+    return
+  }
+
+  // Upgrade legacy plaintext records to a bcrypt hash on successful login.
+  if (!isBcryptHash(staff.password_hash)) {
+    const newHash = await hashPassword(password)
+    await pool.query('UPDATE staff_accounts SET password_hash = $1 WHERE id = $2', [newHash, staff.id])
+  }
+
+  const token = createStaffToken({ email: staff.email, role: staff.role })
+
+  response.json({
+    message: 'Signed in successfully.',
+    token,
+    staff: { email: staff.email, displayName: staff.display_name, role: staff.role },
+  })
 })
 
 app.get('/api/auth/me', requireStaffAuth, async (request, response) => {
-  try {
-    const [rows] = await pool.query(
-      'SELECT email, display_name, role FROM staff_accounts WHERE email = ? LIMIT 1',
-      [request.staffSession.email],
-    )
+  const result = await pool.query('SELECT email, display_name, role FROM staff_accounts WHERE email = $1 LIMIT 1', [
+    request.staffSession.email,
+  ])
+  const staff = result.rows[0]
 
-    const staff = rows[0]
-    if (!staff) {
-      response.status(401).json({ message: 'Unauthorized' })
-      return
-    }
-
-    response.json({
-      staff: {
-        email: staff.email,
-        displayName: staff.display_name,
-        role: staff.role,
-      },
-    })
-  } catch (error) {
-    console.error('[auth] Failed to load staff session.', error)
-    response.status(500).json({ message: 'Failed to load staff session.' })
+  if (!staff) {
+    response.status(401).json({ message: 'Unauthorized' })
+    return
   }
+
+  response.json({ staff: { email: staff.email, displayName: staff.display_name, role: staff.role } })
 })
 
-app.post('/api/auth/logout', (_request, response) => {
-  response.json({ message: 'Signed out successfully.' })
-})
+app.post('/api/auth/change-password', requireStaffAuth, async (request, response) => {
+  const { currentPassword, newPassword } = request.body ?? {}
 
-app.use('/api/members', requireStaffAuth)
-
-function mapAddressRow(row) {
-  return {
-    sameAsCurrent: Boolean(row.same_as_current),
-    houseNoStreet: toInputString(row.house_no_street),
-    barangay: toInputString(row.barangay),
-    municipalityCity: toInputString(row.municipality_city),
-    province: toInputString(row.province),
-    zipCode: toInputString(row.zip_code),
-  }
-}
-
-function mapMemberRow(row) {
-  return {
-    id: row.id,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    personal: {
-      lastName: toInputString(row.last_name),
-      firstName: toInputString(row.first_name),
-      middleName: toInputString(row.middle_name),
-      suffix: toInputString(row.suffix),
-      sex: row.sex ?? 'M',
-      dateOfBirth: toDateValue(row.date_of_birth),
-      placeOfBirth: toInputString(row.place_of_birth),
-      age: row.age === null || row.age === undefined ? '' : String(row.age),
-      civilStatus: row.civil_status ?? 'Single',
-      nationality: toInputString(row.nationality),
-      religion: toInputString(row.religion),
-    },
-    contact: {
-      mobileNumber: toInputString(row.mobile_number),
-      emailAddress: toInputString(row.email_address),
-      facebookProfile: toInputString(row.facebook_profile),
-    },
-    currentAddress: {
-      houseNoStreet: toInputString(row.current_house_no_street),
-      barangay: toInputString(row.current_barangay),
-      municipalityCity: toInputString(row.current_municipality_city),
-      province: toInputString(row.current_province),
-      zipCode: toInputString(row.current_zip_code),
-    },
-    permanentAddress: {
-      sameAsCurrent: Boolean(row.permanent_same_as_current),
-      houseNoStreet: toInputString(row.permanent_house_no_street),
-      barangay: toInputString(row.permanent_barangay),
-      municipalityCity: toInputString(row.permanent_municipality_city),
-      province: toInputString(row.permanent_province),
-      zipCode: toInputString(row.permanent_zip_code),
-    },
-    government: {
-      philSysNationalIdNumber: toInputString(row.philsys_national_id_number),
-      sssNumber: toInputString(row.sss_number),
-      philHealthNumber: toInputString(row.philhealth_number),
-      pagibigNumber: toInputString(row.pagibig_number),
-      tinNumber: toInputString(row.tin_number),
-      passportNumber: toInputString(row.passport_number),
-    },
-    eligibility: {
-      legallyEligible: row.legally_eligible ?? 'Yes',
-      validGovernmentId: row.valid_government_id ?? 'Yes',
-      willingToWork: [],
-    },
-    pwd: {
-      isPersonWithDisability: row.is_person_with_disability ?? 'No',
-      disabilityType: toInputString(row.disability_type),
-    },
-    specialCategories: emptySpecialCategories(),
-    emergency: {
-      fullName: toInputString(row.emergency_full_name),
-      relationship: toInputString(row.emergency_relationship),
-      contactNumber: toInputString(row.emergency_contact_number),
-      address: toInputString(row.emergency_address),
-    },
-    education: {
-      highestEducationalAttainment: toInputString(row.highest_educational_attainment),
-      schoolName: toInputString(row.school_name),
-      courseProgram: toInputString(row.course_program),
-      yearGraduated: toInputString(row.year_graduated),
-      honorsAwards: toInputString(row.honors_awards),
-    },
-    employment: {
-      employmentStatus: row.employment_status ?? 'Employment',
-      desiredPosition: toInputString(row.desired_position),
-      preferredIndustry: toInputString(row.preferred_industry),
-      expectedSalary: toInputString(row.expected_salary),
-      yearsOfExperience: toInputString(row.years_of_experience),
-    },
-    skills: {
-      technicalSkills: toInputString(row.technical_skills),
-      softSkills: toInputString(row.soft_skills),
-      languageSpoken: toInputString(row.language_spoken),
-      computerSkills: toInputString(row.computer_skills),
-      certificationsLicense: toInputString(row.certifications_license),
-    },
-    documents: emptyDocuments(),
-  }
-}
-
-const MEMBER_CHILD_QUERIES = [
-  'SELECT * FROM member_personal_information WHERE member_id IN (?)',
-  'SELECT * FROM member_contact_information WHERE member_id IN (?)',
-  'SELECT * FROM member_addresses WHERE member_id IN (?)',
-  'SELECT * FROM member_government_information WHERE member_id IN (?)',
-  'SELECT * FROM member_employment_eligibility WHERE member_id IN (?)',
-  'SELECT * FROM member_willing_to_work WHERE member_id IN (?)',
-  'SELECT * FROM member_pwd_information WHERE member_id IN (?)',
-  'SELECT * FROM member_special_categories WHERE member_id IN (?)',
-  'SELECT * FROM member_emergency_contacts WHERE member_id IN (?)',
-  'SELECT * FROM member_educational_background WHERE member_id IN (?)',
-  'SELECT * FROM member_employment_information WHERE member_id IN (?)',
-  'SELECT * FROM member_skills WHERE member_id IN (?)',
-  'SELECT * FROM member_documents WHERE member_id IN (?)',
-]
-
-const MEMBER_CHILD_ROW_NAMES = [
-  'personal',
-  'contact',
-  'addresses',
-  'government',
-  'eligibility',
-  'willing',
-  'pwd',
-  'special',
-  'emergency',
-  'education',
-  'employment',
-  'skills',
-  'documents',
-]
-
-function groupRowsByMemberId(rows) {
-  const grouped = new Map()
-
-  for (const row of rows) {
-    const list = grouped.get(row.member_id) ?? []
-    list.push(row)
-    grouped.set(row.member_id, list)
+  if (!currentPassword || !newPassword) {
+    response.status(400).json({ message: 'Current and new passwords are required.' })
+    return
   }
 
-  return grouped
-}
-
-function assembleMember(memberRow, rowsByTable) {
-  const member = mapMemberRow(memberRow)
-  const personalRow = rowsByTable.personal.get(memberRow.id)?.[0] ?? {}
-  const contactRow = rowsByTable.contact.get(memberRow.id)?.[0] ?? {}
-  const addressRows = rowsByTable.addresses.get(memberRow.id) ?? []
-  const currentAddressRow = addressRows.find((row) => row.address_type === 'current') ?? {}
-  const permanentAddressRow = addressRows.find((row) => row.address_type === 'permanent') ?? {}
-  const governmentRow = rowsByTable.government.get(memberRow.id)?.[0] ?? {}
-  const eligibilityRow = rowsByTable.eligibility.get(memberRow.id)?.[0] ?? {}
-  const willingRows = rowsByTable.willing.get(memberRow.id) ?? []
-  const pwdRow = rowsByTable.pwd.get(memberRow.id)?.[0] ?? {}
-  const specialRows = rowsByTable.special.get(memberRow.id) ?? []
-  const emergencyRow = rowsByTable.emergency.get(memberRow.id)?.[0] ?? {}
-  const educationRow = rowsByTable.education.get(memberRow.id)?.[0] ?? {}
-  const employmentRow = rowsByTable.employment.get(memberRow.id)?.[0] ?? {}
-  const skillsRow = rowsByTable.skills.get(memberRow.id)?.[0] ?? {}
-  const documentRow = rowsByTable.documents.get(memberRow.id)?.[0] ?? {}
-
-  member.personal = {
-    ...member.personal,
-    lastName: toInputString(personalRow.last_name),
-    firstName: toInputString(personalRow.first_name),
-    middleName: toInputString(personalRow.middle_name),
-    suffix: toInputString(personalRow.suffix),
-    sex: personalRow.sex ?? 'M',
-    dateOfBirth: toDateValue(personalRow.date_of_birth),
-    placeOfBirth: toInputString(personalRow.place_of_birth),
-    age: personalRow.age === null || personalRow.age === undefined ? '' : String(personalRow.age),
-    civilStatus: personalRow.civil_status ?? 'Single',
-    nationality: toInputString(personalRow.nationality),
-    religion: toInputString(personalRow.religion),
-  }
-  member.contact = {
-    mobileNumber: toInputString(contactRow.mobile_number),
-    emailAddress: toInputString(contactRow.email_address),
-    facebookProfile: toInputString(contactRow.facebook_profile),
-  }
-  member.currentAddress = mapAddressRow(currentAddressRow)
-  member.permanentAddress = mapAddressRow(permanentAddressRow)
-  member.government = {
-    philSysNationalIdNumber: toInputString(governmentRow.philsys_national_id_number),
-    sssNumber: toInputString(governmentRow.sss_number),
-    philHealthNumber: toInputString(governmentRow.philhealth_number),
-    pagibigNumber: toInputString(governmentRow.pagibig_number),
-    tinNumber: toInputString(governmentRow.tin_number),
-    passportNumber: toInputString(governmentRow.passport_number),
-  }
-  member.eligibility = {
-    legallyEligible: eligibilityRow.legally_eligible ?? 'Yes',
-    validGovernmentId: eligibilityRow.valid_government_id ?? 'Yes',
-    willingToWork: willingRows.map((row) => row.work_scope),
-  }
-  member.pwd = {
-    isPersonWithDisability: pwdRow.is_person_with_disability ?? 'No',
-    disabilityType: toInputString(pwdRow.disability_type),
-  }
-  member.specialCategories = emptySpecialCategories()
-  specialRows.forEach((row) => {
-    const field = reverseSpecialCategoryMap[row.category_code]
-    if (field) {
-      member.specialCategories[field] = true
-    }
-  })
-  member.emergency = {
-    fullName: toInputString(emergencyRow.full_name),
-    relationship: toInputString(emergencyRow.relationship),
-    contactNumber: toInputString(emergencyRow.contact_number),
-    address: toInputString(emergencyRow.address),
-  }
-  member.education = {
-    highestEducationalAttainment: toInputString(educationRow.highest_educational_attainment),
-    schoolName: toInputString(educationRow.school_name),
-    courseProgram: toInputString(educationRow.course_program),
-    yearGraduated: toInputString(educationRow.year_graduated),
-    honorsAwards: toInputString(educationRow.honors_awards),
-  }
-  member.employment = {
-    employmentStatus: employmentRow.employment_status ?? 'Employment',
-    desiredPosition: toInputString(employmentRow.desired_position),
-    preferredIndustry: toInputString(employmentRow.preferred_industry),
-    expectedSalary: toInputString(employmentRow.expected_salary),
-    yearsOfExperience: toInputString(employmentRow.years_of_experience),
-  }
-  member.skills = {
-    technicalSkills: toInputString(skillsRow.technical_skills),
-    softSkills: toInputString(skillsRow.soft_skills),
-    languageSpoken: toInputString(skillsRow.language_spoken),
-    computerSkills: toInputString(skillsRow.computer_skills),
-    certificationsLicense: toInputString(skillsRow.certifications_license),
-  }
-  member.documents = {
-    resumeAttached: Boolean(documentRow.resume_attached),
-    validIdAttached: Boolean(documentRow.valid_id_attached),
-    certificateAttached: Boolean(documentRow.certificate_attached),
-    otherDocumentsAttached: Boolean(documentRow.other_documents_attached),
-  }
-
-  return member
-}
-
-async function fetchMembers(memberIds) {
-  const ids = [...new Set(memberIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))]
-  if (ids.length === 0) {
-    return []
-  }
-
-  const [memberRows] = await pool.query(
-    'SELECT id, created_at, updated_at FROM members WHERE id IN (?) ORDER BY id DESC',
-    [ids],
+  const result = await pool.query(
+    'SELECT id, password_hash FROM staff_accounts WHERE email = $1 LIMIT 1',
+    [request.staffSession.email],
   )
+  const staff = result.rows[0]
+
+  if (!staff || !(await verifyPassword(currentPassword, staff.password_hash))) {
+    response.status(401).json({ message: 'Current password is incorrect.' })
+    return
+  }
+
+  const newHash = await hashPassword(newPassword)
+  await pool.query('UPDATE staff_accounts SET password_hash = $1 WHERE id = $2', [newHash, staff.id])
+
+  response.json({ message: 'Password updated successfully.' })
+})
+
+app.get('/api/members', requireStaffAuth, async (request, response) => {
+  const idsResult = await pool.query('SELECT id, created_at, updated_at FROM members ORDER BY id DESC')
+  const memberRows = idsResult.rows
+
   if (memberRows.length === 0) {
-    return []
+    response.json([])
+    return
   }
 
-  const childRows = await Promise.all(MEMBER_CHILD_QUERIES.map((query) => pool.query(query, [ids])))
+  const ids = memberRows.map((row) => row.id)
+  const rowsByTable = await loadMemberRows(pool, ids)
 
-  const rowsByTable = Object.fromEntries(
-    MEMBER_CHILD_ROW_NAMES.map((name, index) => [name, groupRowsByMemberId(childRows[index][0])]),
-  )
+  response.json(memberRows.map((memberRow) => hydrateMember(memberRow, rowsByTable)))
+})
 
-  return memberRows.map((memberRow) => assembleMember(memberRow, rowsByTable))
-}
-
-async function fetchMember(memberId) {
-  const members = await fetchMembers([memberId])
-  return members[0] ?? null
-}
-
-const MAX_SAVE_ATTEMPTS = 3
-
-// Deadlock-safe retry around the multi-table member save. Two staff members
-// saving at the same moment can trip InnoDB lock ordering across the child
-// tables; retrying a fresh transaction resolves it without user action.
-async function saveMember(memberId, payload, mode) {
-  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new InputError('Request body must be a member object.')
+app.get('/api/members/:id', requireStaffAuth, async (request, response) => {
+  const memberId = toMemberId(request.params.id)
+  if (memberId === null) {
+    response.status(400).json({ message: 'Invalid member id.' })
+    return
   }
 
-  validateMemberPayload(payload)
+  const member = await hydrateMemberById(memberId)
+  if (!member) {
+    response.status(404).json({ message: 'Member not found.' })
+    return
+  }
 
-  for (let attempt = 1; attempt <= MAX_SAVE_ATTEMPTS; attempt += 1) {
-    const connection = await pool.getConnection()
+  response.json(member)
+})
 
-    try {
-      await connection.beginTransaction()
+app.post('/api/members', requireStaffAuth, async (request, response) => {
+  const payload = request.body
+  validateMember(payload)
 
-    let resolvedMemberId = memberId
-    if (mode === 'create') {
-      const [result] = await connection.query('INSERT INTO members () VALUES ()')
-      resolvedMemberId = result.insertId
-    } else {
-      const [existingRows] = await connection.query('SELECT id FROM members WHERE id = ?', [memberId])
-      if (existingRows.length === 0) {
-        throw new Error('Member not found')
-      }
+  const existingMatches = await findMemberDuplicates({
+    lastName: payload.personal?.lastName,
+    firstName: payload.personal?.firstName,
+    dateOfBirth: payload.personal?.dateOfBirth,
+    mobileNumber: payload.contact?.mobileNumber,
+    emailAddress: payload.contact?.emailAddress,
+  })
+  if (existingMatches.some((entry) => isExactDuplicate(entry, payload))) {
+    response.status(409).json({ message: 'A member with these exact details already exists.' })
+    return
+  }
+
+  const client = await pool.connect()
+  let memberId = null
+
+  try {
+    await client.query('BEGIN')
+    const insertResult = await client.query('INSERT INTO members DEFAULT VALUES RETURNING id')
+    memberId = insertResult.rows[0].id
+    await insertMemberChildren(client, memberId, payload)
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+
+  const member = await hydrateMemberById(memberId)
+  const duplicates = await findMemberDuplicates({
+    lastName: payload.personal?.lastName,
+    firstName: payload.personal?.firstName,
+    dateOfBirth: payload.personal?.dateOfBirth,
+    mobileNumber: payload.contact?.mobileNumber,
+    emailAddress: payload.contact?.emailAddress,
+    excludeId: memberId,
+  })
+
+  response.status(201).json({ member, duplicates })
+})
+
+app.put('/api/members/:id', requireStaffAuth, async (request, response) => {
+  const memberId = toMemberId(request.params.id)
+  if (memberId === null) {
+    response.status(400).json({ message: 'Invalid member id.' })
+    return
+  }
+
+  const payload = request.body
+  validateMember(payload)
+
+  const client = await pool.connect()
+
+  try {
+    await client.query('BEGIN')
+    const existing = await client.query('SELECT id FROM members WHERE id = $1', [memberId])
+    if (existing.rows.length === 0) {
+      await client.query('ROLLBACK')
+      response.status(404).json({ message: 'Member not found.' })
+      return
     }
 
-    const permanentAddress = payload.permanentAddress?.sameAsCurrent
-      ? { ...payload.currentAddress, sameAsCurrent: true }
-      : payload.permanentAddress ?? {}
+    await upsertMemberChildren(client, memberId, payload)
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
 
-    const currentAddressValues = [
-      resolvedMemberId,
-      'current',
-      0,
-      toTrimmedString(payload.currentAddress?.houseNoStreet),
-      toTrimmedString(payload.currentAddress?.barangay),
-      toTrimmedString(payload.currentAddress?.municipalityCity),
-      toTrimmedString(payload.currentAddress?.province),
-      toTrimmedString(payload.currentAddress?.zipCode),
-    ]
+  const member = await hydrateMemberById(memberId)
+  const duplicates = await findMemberDuplicates({
+    lastName: payload.personal?.lastName,
+    firstName: payload.personal?.firstName,
+    dateOfBirth: payload.personal?.dateOfBirth,
+    mobileNumber: payload.contact?.mobileNumber,
+    emailAddress: payload.contact?.emailAddress,
+    excludeId: memberId,
+  })
 
-    const permanentAddressValues = [
-      resolvedMemberId,
-      'permanent',
-      toBoolean(payload.permanentAddress?.sameAsCurrent) ? 1 : 0,
-      toTrimmedString(permanentAddress.houseNoStreet),
-      toTrimmedString(permanentAddress.barangay),
-      toTrimmedString(permanentAddress.municipalityCity),
-      toTrimmedString(permanentAddress.province),
-      toTrimmedString(permanentAddress.zipCode),
-    ]
+  response.json({ member, duplicates })
+})
 
-    const personal = payload.personal ?? {}
-    const contact = payload.contact ?? {}
-    const government = payload.government ?? {}
-    const eligibility = payload.eligibility ?? {}
-    const pwd = payload.pwd ?? {}
-    const emergency = payload.emergency ?? {}
-    const education = payload.education ?? {}
-    const employment = payload.employment ?? {}
-    const skills = payload.skills ?? {}
-    const documents = payload.documents ?? {}
+app.delete('/api/members/:id', requireStaffAuth, async (request, response) => {
+  const memberId = toMemberId(request.params.id)
+  if (memberId === null) {
+    response.status(400).json({ message: 'Invalid member id.' })
+    return
+  }
 
-    await Promise.all([
-      connection.query('DELETE FROM member_personal_information WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_contact_information WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_addresses WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_government_information WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_employment_eligibility WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_willing_to_work WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_pwd_information WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_special_categories WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_emergency_contacts WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_educational_background WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_employment_information WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_skills WHERE member_id = ?', [resolvedMemberId]),
-      connection.query('DELETE FROM member_documents WHERE member_id = ?', [resolvedMemberId]),
+  const client = await pool.connect()
+  let attachmentPaths = []
+
+  try {
+    await client.query('BEGIN')
+    const attachmentRows = await client.query('SELECT storage_path FROM document_attachments WHERE member_id = $1', [
+      memberId,
     ])
+    attachmentPaths = attachmentRows.rows.map((row) => row.storage_path)
 
-    await connection.query(
-      `INSERT INTO member_personal_information (
-        member_id,
-        last_name,
-        first_name,
-        middle_name,
-        suffix,
-        sex,
-        date_of_birth,
-        place_of_birth,
-        age,
-        civil_status,
-        nationality,
-        religion
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        resolvedMemberId,
-        toTrimmedString(personal.lastName),
-        toTrimmedString(personal.firstName),
-        toTrimmedString(personal.middleName),
-        toTrimmedString(personal.suffix),
-        personal.sex ?? 'M',
-        toDateValue(personal.dateOfBirth),
-        toTrimmedString(personal.placeOfBirth),
-        toIntegerOrNull(personal.age),
-        personal.civilStatus ?? 'Single',
-        toTrimmedString(personal.nationality),
-        toTrimmedString(personal.religion),
-      ],
-    )
-
-    await connection.query(
-      `INSERT INTO member_contact_information (
-        member_id,
-        mobile_number,
-        email_address,
-        facebook_profile
-      ) VALUES (?, ?, ?, ?)`,
-      [
-        resolvedMemberId,
-        toTrimmedString(contact.mobileNumber),
-        toTrimmedString(contact.emailAddress),
-        toTrimmedString(contact.facebookProfile),
-      ],
-    )
-
-    await connection.query(
-      `INSERT INTO member_addresses (
-        member_id,
-        address_type,
-        same_as_current,
-        house_no_street,
-        barangay,
-        municipality_city,
-        province,
-        zip_code
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      currentAddressValues,
-    )
-
-    await connection.query(
-      `INSERT INTO member_addresses (
-        member_id,
-        address_type,
-        same_as_current,
-        house_no_street,
-        barangay,
-        municipality_city,
-        province,
-        zip_code
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      permanentAddressValues,
-    )
-
-    await connection.query(
-      `INSERT INTO member_government_information (
-        member_id,
-        philsys_national_id_number,
-        sss_number,
-        philhealth_number,
-        pagibig_number,
-        tin_number,
-        passport_number
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        resolvedMemberId,
-        toTrimmedString(government.philSysNationalIdNumber),
-        toTrimmedString(government.sssNumber),
-        toTrimmedString(government.philHealthNumber),
-        toTrimmedString(government.pagibigNumber),
-        toTrimmedString(government.tinNumber),
-        toTrimmedString(government.passportNumber),
-      ],
-    )
-
-    await connection.query(
-      `INSERT INTO member_employment_eligibility (
-        member_id,
-        legally_eligible,
-        valid_government_id
-      ) VALUES (?, ?, ?)`,
-      [resolvedMemberId, eligibility.legallyEligible ?? 'Yes', eligibility.validGovernmentId ?? 'Yes'],
-    )
-
-    const workScopes = Array.isArray(eligibility.willingToWork) ? eligibility.willingToWork : []
-    await Promise.all(
-      workScopes.map((workScope) =>
-        connection.query(
-          'INSERT INTO member_willing_to_work (member_id, work_scope) VALUES (?, ?)',
-          [resolvedMemberId, workScope],
-        ),
-      ),
-    )
-
-    await connection.query(
-      `INSERT INTO member_pwd_information (
-        member_id,
-        is_person_with_disability,
-        disability_type
-      ) VALUES (?, ?, ?)`,
-      [resolvedMemberId, pwd.isPersonWithDisability ?? 'No', toTrimmedString(pwd.disabilityType)],
-    )
-
-    const selectedCategories = Object.entries(payload.specialCategories ?? {})
-      .filter(([, selected]) => Boolean(selected))
-      .map(([field]) => specialCategoryMap[field])
-      .filter(Boolean)
-
-    await Promise.all(
-      selectedCategories.map((categoryCode) =>
-        connection.query(
-          'INSERT INTO member_special_categories (member_id, category_code) VALUES (?, ?)',
-          [resolvedMemberId, categoryCode],
-        ),
-      ),
-    )
-
-    await connection.query(
-      `INSERT INTO member_emergency_contacts (
-        member_id,
-        full_name,
-        relationship,
-        contact_number,
-        address
-      ) VALUES (?, ?, ?, ?, ?)`,
-      [
-        resolvedMemberId,
-        toTrimmedString(emergency.fullName),
-        toTrimmedString(emergency.relationship),
-        toTrimmedString(emergency.contactNumber),
-        toTrimmedString(emergency.address),
-      ],
-    )
-
-    await connection.query(
-      `INSERT INTO member_educational_background (
-        member_id,
-        highest_educational_attainment,
-        school_name,
-        course_program,
-        year_graduated,
-        honors_awards
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        resolvedMemberId,
-        toTrimmedString(education.highestEducationalAttainment),
-        toTrimmedString(education.schoolName),
-        toTrimmedString(education.courseProgram),
-        toTrimmedString(education.yearGraduated),
-        toTrimmedString(education.honorsAwards),
-      ],
-    )
-
-    await connection.query(
-      `INSERT INTO member_employment_information (
-        member_id,
-        employment_status,
-        desired_position,
-        preferred_industry,
-        expected_salary,
-        years_of_experience
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        resolvedMemberId,
-        employment.employmentStatus ?? 'Employment',
-        toTrimmedString(employment.desiredPosition),
-        toTrimmedString(employment.preferredIndustry),
-        toTrimmedString(employment.expectedSalary),
-        toTrimmedString(employment.yearsOfExperience),
-      ],
-    )
-
-    await connection.query(
-      `INSERT INTO member_skills (
-        member_id,
-        technical_skills,
-        soft_skills,
-        language_spoken,
-        computer_skills,
-        certifications_license
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        resolvedMemberId,
-        toTrimmedString(skills.technicalSkills),
-        toTrimmedString(skills.softSkills),
-        toTrimmedString(skills.languageSpoken),
-        toTrimmedString(skills.computerSkills),
-        toTrimmedString(skills.certificationsLicense),
-      ],
-    )
-
-    await connection.query(
-      `INSERT INTO member_documents (
-        member_id,
-        resume_attached,
-        valid_id_attached,
-        certificate_attached,
-        other_documents_attached
-      ) VALUES (?, ?, ?, ?, ?)`,
-      [
-        resolvedMemberId,
-        toBoolean(documents.resumeAttached) ? 1 : 0,
-        toBoolean(documents.validIdAttached) ? 1 : 0,
-        toBoolean(documents.certificateAttached) ? 1 : 0,
-        toBoolean(documents.otherDocumentsAttached) ? 1 : 0,
-      ],
-    )
-
-    await connection.commit()
-
-    const savedMember = await fetchMember(resolvedMemberId)
-    return savedMember
-  } catch (error) {
-    await connection.rollback().catch(() => {})
-
-    const isRetryable = error?.code === 'ER_LOCK_DEADLOCK' || error?.code === 'ER_LOCK_WAIT_TIMEOUT'
-    if (isRetryable && attempt < MAX_SAVE_ATTEMPTS) {
-      console.warn(`[members] Save transaction contended, retrying (${attempt}/${MAX_SAVE_ATTEMPTS}).`)
-      continue
-    }
-
-    throw error
-  } finally {
-    connection.release()
-  }
-  }
-}
-
-async function deleteMember(memberId) {
-  const connection = await pool.getConnection()
-
-  try {
-    await connection.beginTransaction()
-    const [result] = await connection.query('DELETE FROM members WHERE id = ?', [memberId])
-    await connection.commit()
-
-    return result.affectedRows > 0
-  } catch (error) {
-    await connection.rollback()
-    throw error
-  } finally {
-    connection.release()
-  }
-}
-
-app.get('/api/health', (request, response) => {
-  response.json({ ok: true })
-})
-
-app.get('/api/members', async (request, response) => {
-  try {
-    const [rows] = await pool.query('SELECT id FROM members ORDER BY id DESC')
-    const members = await fetchMembers(rows.map((row) => row.id))
-    response.json(members)
-  } catch (error) {
-    console.error('[members] Failed to load members.', error)
-    response.status(500).json({ message: 'Failed to load members.' })
-  }
-})
-
-app.get('/api/members/:id', async (request, response) => {
-  const memberId = parseMemberId(request.params.id)
-  if (memberId === null) {
-    response.status(400).json({ message: 'Invalid member id.' })
-    return
-  }
-
-  try {
-    const member = await fetchMember(memberId)
-    if (!member) {
+    const deleteResult = await client.query('DELETE FROM members WHERE id = $1', [memberId])
+    if (deleteResult.rowCount === 0) {
+      await client.query('ROLLBACK')
       response.status(404).json({ message: 'Member not found.' })
       return
     }
-
-    response.json(member)
+    await client.query('COMMIT')
   } catch (error) {
-    console.error('[members] Failed to load member.', error)
-    response.status(500).json({ message: 'Failed to load member.' })
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
   }
+
+  // Best-effort cleanup of the files in storage (DB rows already cascaded).
+  await Promise.all(attachmentPaths.map((storagePath) => deleteAttachment(storagePath).catch(() => {})))
+
+  response.json({ message: 'Member deleted.', deletedId: memberId })
 })
 
-app.post('/api/members', async (request, response) => {
-  try {
-    const savedMember = await saveMember(null, request.body, 'create')
-    const duplicates = await findMemberDuplicates(request.body, savedMember.id)
-    response.status(201).json({
-      message: 'Member record inserted successfully.',
-      member: savedMember,
-      duplicates,
-    })
-  } catch (error) {
-    if (error instanceof InputError) {
-      response.status(400).json({ message: error.message })
-      return
-    }
+// ---------------------------------------------------------------------------
+// Digital document attachments
+// ---------------------------------------------------------------------------
 
-    console.error('[members] Failed to create member.', error)
-    response.status(500).json({ message: 'Failed to create member.' })
-  }
-})
-
-app.put('/api/members/:id', async (request, response) => {
-  const memberId = parseMemberId(request.params.id)
+app.get('/api/members/:id/documents', requireStaffAuth, async (request, response) => {
+  const memberId = toMemberId(request.params.id)
   if (memberId === null) {
     response.status(400).json({ message: 'Invalid member id.' })
     return
   }
 
-  try {
-    const savedMember = await saveMember(memberId, request.body, 'update')
-    const duplicates = await findMemberDuplicates(request.body, memberId)
-    response.json({
-      message: 'Member record updated successfully.',
-      member: savedMember,
-      duplicates,
-    })
-  } catch (error) {
-    if (error.message === 'Member not found') {
-      response.status(404).json({ message: error.message })
-      return
-    }
-
-    if (error instanceof InputError) {
-      response.status(400).json({ message: error.message })
-      return
-    }
-
-    console.error('[members] Failed to update member.', error)
-    response.status(500).json({ message: 'Failed to update member.' })
+  const member = await findMemberRow(pool, memberId)
+  if (!member) {
+    response.status(404).json({ message: 'Member not found.' })
+    return
   }
+
+  const result = await pool.query(`${attachmentSelectSql()} WHERE member_id = $1 ORDER BY created_at DESC, id DESC`, [
+    memberId,
+  ])
+  response.json(result.rows.map(serializeAttachment))
 })
 
-app.delete('/api/members/:id', async (request, response) => {
-  const memberId = parseMemberId(request.params.id)
+app.post('/api/members/:id/documents', requireStaffAuth, attachmentUpload.single('file'), async (request, response) => {
+  const memberId = toMemberId(request.params.id)
   if (memberId === null) {
     response.status(400).json({ message: 'Invalid member id.' })
     return
   }
 
-  try {
-    const deleted = await deleteMember(memberId)
-    if (!deleted) {
-      response.status(404).json({ message: 'Member not found.' })
-      return
-    }
-
-    response.json({ message: 'Member record deleted successfully.' })
-  } catch (error) {
-    console.error('[members] Failed to delete member.', error)
-    response.status(500).json({ message: 'Failed to delete member.' })
+  const documentType = request.body?.documentType
+  if (!allowedDocumentTypes.has(documentType)) {
+    response.status(400).json({ message: 'Invalid document type.' })
+    return
   }
+
+  if (!request.file) {
+    response.status(400).json({ message: 'A file is required.' })
+    return
+  }
+
+  const member = await findMemberRow(pool, memberId)
+  if (!member) {
+    response.status(404).json({ message: 'Member not found.' })
+    return
+  }
+
+  const { buffer, size, mimetype } = request.file
+  const originalName = path.basename(String(request.file.originalname ?? '')).slice(0, 255)
+  const fileExtension = path.extname(originalName).toLowerCase().replace('.', '')
+  const acceptedExtensions = allowedFileTypes.get(mimetype)
+
+  if (!acceptedExtensions || !acceptedExtensions.includes(fileExtension)) {
+    response.status(400).json({ message: 'File type not allowed. Upload a PDF, Word, Excel, text, or image file.' })
+    return
+  }
+
+  const storagePath = `members/${memberId}/${documentType}-${crypto.randomUUID()}.${fileExtension}`
+
+  await uploadAttachment({ storagePath, buffer, contentType: mimetype })
+
+  let inserted
+  try {
+    const insertResult = await pool.query(
+      `INSERT INTO document_attachments (member_id, document_type, file_name, storage_path, mime_type, file_size, uploaded_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, document_type, file_name, mime_type, file_size, uploaded_by, created_at`,
+      [memberId, documentType, originalName, storagePath, mimetype, size, request.staffSession.email],
+    )
+    inserted = insertResult.rows[0]
+  } catch (error) {
+    // Keep DB and storage consistent: drop the file if the row cannot be saved.
+    await deleteAttachment(storagePath).catch(() => {})
+    throw error
+  }
+
+  response.status(201).json({ attachment: serializeAttachment(inserted) })
 })
 
-// API 404 fallback (must be registered after all /api routes).
-app.use('/api', (request, response) => {
-  response.status(404).json({ message: 'Not found.' })
-})// Centralized error handler.
+app.get('/api/members/:id/documents/:attachmentId/download', requireStaffAuth, async (request, response) => {
+  const memberId = toMemberId(request.params.id)
+  const attachmentId = toMemberId(request.params.attachmentId)
+  if (memberId === null || attachmentId === null) {
+    response.status(400).json({ message: 'Invalid member or attachment id.' })
+    return
+  }
+
+  const result = await pool.query(`${attachmentSelectSql()} WHERE id = $1 AND member_id = $2`, [attachmentId, memberId])
+  const attachment = result.rows[0]
+
+  if (!attachment) {
+    response.status(404).json({ message: 'Attachment not found.' })
+    return
+  }
+
+  const fileBuffer = await downloadAttachment(attachment.storage_path)
+
+  response.setHeader('Content-Type', attachment.mime_type)
+  response.setHeader('Content-Length', String(attachment.file_size))
+  response.setHeader(
+    'Content-Disposition',
+    `attachment; filename*=UTF-8''${encodeURIComponent(attachment.file_name)}`,
+  )
+  response.send(fileBuffer)
+})
+
+app.delete('/api/members/:id/documents/:attachmentId', requireStaffAuth, async (request, response) => {
+  const memberId = toMemberId(request.params.id)
+  const attachmentId = toMemberId(request.params.attachmentId)
+  if (memberId === null || attachmentId === null) {
+    response.status(400).json({ message: 'Invalid member or attachment id.' })
+    return
+  }
+
+  const result = await pool.query('SELECT storage_path FROM document_attachments WHERE id = $1 AND member_id = $2', [
+    attachmentId,
+    memberId,
+  ])
+  const attachment = result.rows[0]
+
+  if (!attachment) {
+    response.status(404).json({ message: 'Attachment not found.' })
+    return
+  }
+
+  await pool.query('DELETE FROM document_attachments WHERE id = $1', [attachmentId])
+  await deleteAttachment(attachment.storage_path).catch(() => {})
+
+  response.json({ message: 'Attachment deleted.', deletedId: attachmentId })
+})
+
+// Error handling
 app.use((error, request, response, _next) => {
-  const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 500
-    ? error.status
-    : 500
+  let status = error.status ?? 500
+
+  if (error instanceof multer.MulterError) {
+    status = error.code === 'LIMIT_FILE_SIZE' ? 413 : 400
+  }
 
   if (status >= 500) {
-    console.error(`[error] ${request.method} ${request.originalUrl}`, error)
+    console.error(error)
   }
-
-  response.status(status).json({ message: status >= 500 ? 'Internal server error.' : error.message })
+  response.status(status).json({ message: error.message || 'Internal server error.' })
 })
 
 export default app

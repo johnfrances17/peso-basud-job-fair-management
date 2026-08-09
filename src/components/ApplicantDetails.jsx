@@ -1,13 +1,13 @@
-import { documentOptions } from '../lib/constants.js'
 import {
   formatDisplayDate,
   formatSex,
   getCategoryLabels,
   getCategorySummary,
 } from '../lib/format.js'
+import DocumentsSection from './DocumentsSection.jsx'
 import { DetailSection } from './ui.jsx'
 
-export default function ApplicantDetails({ member }) {
+export default function ApplicantDetails({ member, authToken }) {
   return (
     <div className="detail-view">
       <section className="detail-hero panel">
@@ -105,8 +105,14 @@ export default function ApplicantDetails({ member }) {
         ['Languages Spoken', member.skills.languageSpoken],
         ['Computer Skills', member.skills.computerSkills],
         ['Certifications / Licenses', member.skills.certificationsLicense],
-        ['Documents', documentOptions.filter(([field]) => member.documents?.[field]).map(([, label]) => label).join(', ') || 'None marked as attached'],
       ]} />
+
+      <DocumentsSection
+        memberId={member.id}
+        authToken={authToken}
+        physicalDocuments={member.documents}
+        readOnly
+      />
     </div>
   )
 }
