@@ -33,6 +33,7 @@ function App() {
   const [modalOpen, setModalOpen] = useState(false)
   const [submitNotice, setSubmitNotice] = useState('')
   const [loadingMembers, setLoadingMembers] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState('')
   const [modalMode, setModalMode] = useState('create')
   const [activeMember, setActiveMember] = useState(null)
@@ -273,6 +274,10 @@ function App() {
 
   async function handleSubmit(event) {
     event.preventDefault()
+    if (submitting) {
+      return
+    }
+    setSubmitting(true)
     setSubmitNotice('')
     setFormError('')
 
@@ -303,6 +308,8 @@ function App() {
         return
       }
       setFormError(error.message)
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -383,6 +390,7 @@ function App() {
         formError={formError}
         submitNotice={submitNotice}
         loadingMembers={loadingMembers}
+        submitting={submitting}
         editingId={editingId}
         authToken={authToken}
         onClose={closeModal}

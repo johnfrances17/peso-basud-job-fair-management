@@ -11,7 +11,7 @@ import {
 import { toggleArrayValue } from '../lib/members.js'
 import { FieldLabel, Notice } from './ui.jsx'
 
-export default function ApplicantForm({ form, editingId, loadingMembers, submitNotice, onFieldChange, onSubmit, onCancel, children }) {
+export default function ApplicantForm({ form, editingId, loadingMembers, submitting, submitNotice, onFieldChange, onSubmit, onCancel, children }) {
   return (
     <form className="member-form" onSubmit={onSubmit}>
       <fieldset className="form-section">
@@ -364,7 +364,7 @@ export default function ApplicantForm({ form, editingId, loadingMembers, submitN
 
       <div className="actions-row modal-actions">
         <button type="button" className="secondary-button" onClick={onCancel}>Cancel</button>
-        <button type="submit" className="primary-button" disabled={loadingMembers}>{editingId ? 'Save Changes' : 'Save Applicant'}</button>
+        <button type="submit" className="primary-button" disabled={submitting || loadingMembers}>{submitting ? 'Saving…' : editingId ? 'Save Changes' : 'Save Applicant'}</button>
       </div>
 
       {submitNotice ? <Notice>{submitNotice}</Notice> : null}

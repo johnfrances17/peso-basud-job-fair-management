@@ -495,7 +495,7 @@ async function findMemberDuplicates({ lastName, firstName, dateOfBirth, mobileNu
     params.push(excludeId)
   }
 
-  const sql = `SELECT DISTINCT m.id, p.last_name, p.first_name, c.mobile_number, c.email_address
+  const sql = `SELECT DISTINCT m.id, p.last_name, p.first_name, p.date_of_birth, c.mobile_number, c.email_address
     FROM members m
     JOIN member_personal_information p ON p.member_id = m.id
     JOIN member_contact_information c ON c.member_id = m.id
@@ -508,9 +508,24 @@ async function findMemberDuplicates({ lastName, firstName, dateOfBirth, mobileNu
     id: row.id,
     lastName: row.last_name,
     firstName: row.first_name,
+    dateOfBirth: row.date_of_birth,
     mobileNumber: row.mobile_number,
     emailAddress: row.email_address,
   }))
+}
+
+function isSameNormalized(valueA, valueB) {
+  return String(valueA ?? '').trim().toLowerCase() === String(valueB ?? '').trim().toLowerCase()
+}
+
+function isExactDuplicate(candidate, payload) {
+  return (
+    isSameNormalized(candidate.lastName, payload.personal?.lastName)
+    && isSameNormalized(candidate.firstName, payload.personal?.firstName)
+    && String(candidate.dateOfBirth ?? '') === String(toDateValue(payload.personal?.dateOfBirth) ?? '')
+    && isSameNormalized(candidate.mobileNumber, payload.contact?.mobileNumber)
+    && isSameNormalized(candidate.emailAddress, payload.contact?.emailAddress)
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -698,6 +713,18 @@ app.get('/api/members/:id', requireStaffAuth, async (request, response) => {
 app.post('/api/members', requireStaffAuth, async (request, response) => {
   const payload = request.body
   validateMember(payload)
+
+  const existingMatches = await findMemberDuplicates({
+    lastName: payload.personal?.lastName,
+    firstName: payload.personal?.firstName,
+    dateOfBirth: payload.personal?.dateOfBirth,
+    mobileNumber: payload.contact?.mobileNumber,
+    emailAddress: payload.contact?.emailAddress,
+  })
+  if (existingMatches.some((entry) => isExactDuplicate(entry, payload))) {
+    response.status(409).json({ message: 'A member with these exact details already exists.' })
+    return
+  }
 
   const client = await pool.connect()
   let memberId = null

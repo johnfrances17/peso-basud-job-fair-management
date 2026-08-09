@@ -11,6 +11,7 @@ export default function ApplicantModal({
   formError,
   submitNotice,
   loadingMembers,
+  submitting,
   editingId,
   authToken,
   onClose,
@@ -80,6 +81,7 @@ export default function ApplicantModal({
               form={form}
               editingId={editingId}
               loadingMembers={loadingMembers}
+              submitting={submitting}
               submitNotice={submitNotice}
               onFieldChange={onFieldChange}
               onSubmit={onSubmit}
