@@ -41,10 +41,24 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? 'http://localhost:5173,ht
   .map((origin) => origin.trim())
   .filter(Boolean)
 
+function isOriginAllowed(origin) {
+  if (!origin || allowedOrigins.includes(origin)) {
+    return true
+  }
+  // Entries like "https://*.vercel.app" match any subdomain (Vercel previews).
+  return allowedOrigins.some((entry) => {
+    const wildcardIndex = entry.indexOf('*')
+    if (wildcardIndex === -1) {
+      return false
+    }
+    return origin.length > entry.length - 1 && origin.endsWith(entry.slice(wildcardIndex + 1))
+  })
+}
+
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (isOriginAllowed(origin)) {
         callback(null, true)
         return
       }
