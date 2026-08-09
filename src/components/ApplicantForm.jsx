@@ -11,7 +11,7 @@ import {
 import { toggleArrayValue } from '../lib/members.js'
 import { FieldLabel, Notice } from './ui.jsx'
 
-export default function ApplicantForm({ form, editingId, loadingMembers, submitNotice, onFieldChange, onSubmit, onCancel }) {
+export default function ApplicantForm({ form, editingId, loadingMembers, submitNotice, onFieldChange, onSubmit, onCancel, children }) {
   return (
     <form className="member-form" onSubmit={onSubmit}>
       <fieldset className="form-section">
@@ -359,6 +359,8 @@ export default function ApplicantForm({ form, editingId, loadingMembers, submitN
             : 'Mark a document as attached when a physical paper copy has been received. Digital copies can be uploaded after the applicant is saved.'}
         </p>
       </fieldset>
+
+      {children}
 
       <div className="actions-row modal-actions">
         <button type="button" className="secondary-button" onClick={onCancel}>Cancel</button>
