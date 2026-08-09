@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import request from 'supertest'
 import app from '../server/app.js'
-import { TEST_DB_NAME } from './global-setup.js'
+import pool from '../server/db.js'
 
 function validToken() {
   return request(app)
@@ -62,20 +62,9 @@ describe('POST /api/auth/login', () => {
     expect(response.status).toBe(200)
     expect(response.body.token).toBeTruthy()
 
-    const mysql = (await import('mysql2/promise')).default
-    const connection = await mysql.createConnection({
-      host: process.env.DB_HOST ?? '127.0.0.1',
-      port: Number(process.env.DB_PORT ?? 3306),
-      user: process.env.DB_USER ?? 'root',
-      password: process.env.DB_PASSWORD ?? '',
-      database: TEST_DB_NAME,
-    })
-
-    const [rows] = await connection.query(
-      'SELECT password_hash FROM staff_accounts WHERE email = ?',
-      ['legacy@basud.local'],
-    )
-    await connection.end()
+    const { rows } = await pool.query('SELECT password_hash FROM staff_accounts WHERE email = $1', [
+      'legacy@basud.local',
+    ])
 
     expect(rows[0].password_hash).toMatch(/^\$2[aby]\$/)
   })
