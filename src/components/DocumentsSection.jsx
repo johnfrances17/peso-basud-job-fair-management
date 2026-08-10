@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { requestJson, uploadFile, downloadFile } from '../lib/api.js'
+import { requestJson, downloadFile } from '../lib/api.js'
 import { getDocumentStatusCounts } from '../lib/documents.js'
 import { formatDisplayDate } from '../lib/format.js'
 import { Notice } from './ui.jsx'
