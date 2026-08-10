@@ -55,6 +55,17 @@ function getPageList(currentPage, totalPages) {
   return [...pages].sort((pageA, pageB) => pageA - pageB)
 }
 
+// Relative widths for loading skeleton bars, keyed by column.
+const skeletonColumnWidths = {
+  name: '46%',
+  age: '16%',
+  gender: '20%',
+  address: '42%',
+  contact: '34%',
+  category: '24%',
+  dateSigned: '28%',
+}
+
 export default function DashboardView({ members, loadingMembers, formError, onAddApplicant, onOpenMember, onDeleteSelected }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
@@ -411,7 +422,28 @@ export default function DashboardView({ members, loadingMembers, formError, onAd
               </tr>
             </thead>
             <tbody>
-              {paginatedMembers.length > 0 ? (
+              {loadingMembers ? (
+                <>
+                  {[0, 1, 2].map((rowIndex) => (
+                    <tr key={rowIndex} className="skeleton-row" aria-hidden="true">
+                      <td className="check-col"><span className="skeleton-box skeleton-check" /></td>
+                      {summaryColumnOptions
+                        .filter(([key]) => columnVisibility[key])
+                        .map(([key]) => (
+                          <td key={key}><span className="skeleton-box" style={{ width: skeletonColumnWidths[key] }} /></td>
+                        ))}
+                    </tr>
+                  ))}
+                  <tr className="table-status-row">
+                    <td colSpan={visibleColumnCount + 1}>
+                      <div className="table-loading-state" role="status" aria-live="polite">
+                        <span className="spinner" aria-hidden="true" />
+                        <span>Loading records…</span>
+                      </div>
+                    </td>
+                  </tr>
+                </>
+              ) : paginatedMembers.length > 0 ? (
                 paginatedMembers.map((member) => (
                   <tr key={member.id} className="member-row" onClick={() => onOpenMember(member)} role="button" tabIndex={0} onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
@@ -448,7 +480,11 @@ export default function DashboardView({ members, loadingMembers, formError, onAd
 
         <div className="pagination-bar">
           <span className="pagination-summary">
-            {sortedMembers.length > 0 ? `Showing ${shownStart}–${shownEnd} of ${sortedMembers.length}` : 'No records to show'}
+            {loadingMembers
+              ? 'Loading records…'
+              : sortedMembers.length > 0
+                ? `Showing ${shownStart}–${shownEnd} of ${sortedMembers.length}`
+                : 'No records to show'}
           </span>
 
           <div className="page-numbers">
@@ -468,8 +504,6 @@ export default function DashboardView({ members, loadingMembers, formError, onAd
           </div>
         </div>
       </div>
-
-      {loadingMembers ? <div className="loading-strip" role="status">Loading records...</div> : null}
     </section>
   )
 }
