@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import 'dotenv/config'
 import pg from 'pg'
 import bcrypt from 'bcryptjs'
 
@@ -8,7 +9,11 @@ import bcrypt from 'bcryptjs'
 // (or a local instance), so they never touch production data. queries.js and
 // app.js qualify every table with DB_SCHEMA (set in setup-env.js); this setup
 // script creates that schema and loads the schema.sql definitions into it.
-export const TEST_SCHEMA = 'test'
+//
+// CI assigns a per-run schema (DB_SCHEMA=test_<run_id>) so concurrent runs on
+// the shared Supabase database cannot drop each other's schema mid-test; the
+// teardown below drops the schema again so the database stays clean.
+export const TEST_SCHEMA = process.env.DB_SCHEMA ?? 'test'
 
 const connectionString = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL
 
@@ -46,4 +51,14 @@ export default async function globalSetup() {
   )
 
   await client.end()
+
+  return async () => {
+    const teardownClient = new pg.Client({
+      connectionString,
+      ssl: requiresSsl(connectionString) ? { rejectUnauthorized: false } : undefined,
+    })
+    await teardownClient.connect()
+    await teardownClient.query(`DROP SCHEMA IF EXISTS ${TEST_SCHEMA} CASCADE`)
+    await teardownClient.end()
+  }
 }

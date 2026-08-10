@@ -11,20 +11,42 @@ Member registration and management system for the PESO (Public Employment Servic
 - **Deployment** — Vercel (`vercel.json` routes `/api/*` to the serverless function, everything else to the SPA)
 - **CI** — GitHub Actions (`.github/workflows/ci.yml`): lint, build, test
 
+## Environment variables by platform
+
+Local: copy `.env.example` to `.env` and fill in (the example now defaults to
+Supabase pooled connection details).
+
+Vercel (project Settings -> Environment Variables) — set these or the API breaks:
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | Yes | Supabase pooled connection string (port 6543) |
+| `DATABASE_SSL` | Yes | `true` for Supabase |
+| `AUTH_SECRET` | Yes | Long random string. Without it sessions reset on every cold start and staff get logged out |
+| `SUPABASE_URL` | Attachments | Only needed for document uploads/downloads |
+| `SUPABASE_SERVICE_ROLE_KEY` | Attachments | Service role key; backend only, never commit it |
+| `ALLOWED_ORIGINS` | No | Only for cross-origin API calls; `https://*.vercel.app` wildcards supported |
+
+GitHub (repo Settings -> Secrets and variables -> Actions) — one secret:
+
+| Secret | Notes |
+| --- | --- |
+| `TEST_DATABASE_URL` | Connection string used by CI. The shared Supabase project works: tests isolate all data in a dedicated `test` schema and never touch `public` data |
+
 ## Local development
 
 1. Install dependencies: `npm install`
-2. Create `.env` from `.env.example` and fill in:
-   - `DATABASE_URL` — Supabase pooled connection string
-   - `DATABASE_SSL=true` for remote managed Postgres
-   - `AUTH_SECRET` — long random string for staff session tokens
-   - `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` — required only for document attachments (backend only, never commit the service role key)
+2. Create `.env` from `.env.example` and fill in the Supabase pooled `DATABASE_URL` (the example ships with `DATABASE_SSL=true` and placeholders)
 3. Run the API: `npm run server` (Express on `http://localhost:3001`)
 4. Run the frontend: `npm run dev` (Vite proxies `/api` to the API server)
 
 ## Database
 
-Apply `database/schema.sql` to the Supabase project via the SQL editor (or run it once per test schema automatically). It creates all tables, enables RLS (deny-all for anon/authenticated roles — the app connects as the postgres role, which bypasses RLS), and seeds the PESO admin account.
+`database/schema.sql` is the canonical schema. It creates all tables, enables RLS (deny-all for anon/authenticated roles — the app connects as the postgres role, which bypasses RLS), and seeds the PESO admin account.
+
+> **Warning:** `schema.sql` is a full reset script — it DROPs and recreates every table. Run it only on a fresh Supabase project. Never run it against the live database; incremental changes belong in `database/migrations/`.
+
+To (re)create the schema on a fresh Supabase project, paste `database/schema.sql` into the SQL editor. The test suite recreates it automatically inside an isolated `test` schema.
 
 ### Staff login
 
@@ -41,7 +63,7 @@ node -e "console.log(require('bcryptjs').hashSync('NEW_PASSWORD', 10))"
 
 ## Tests
 
-`npm test` runs the Vitest suite (validation, duplicate detection, documents, formatting, sorting). Tests isolate data in a dedicated `test` schema and need either a local Postgres (`postgres://postgres:postgres@127.0.0.1:5432/basud_db`) or a remote one via `TEST_DATABASE_URL`.
+`npm test` runs the Vitest suite (validation, duplicate detection, documents, formatting, sorting). Tests reuse `DATABASE_URL` (or `TEST_DATABASE_URL` if set) and isolate all data in a dedicated `test` schema — safe on the shared Supabase project, since `public` data is untouched. On CI, `TEST_DATABASE_URL` comes from the GitHub repository secret.
 
 ## API
 

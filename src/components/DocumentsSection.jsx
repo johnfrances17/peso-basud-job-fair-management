@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { requestJson, uploadFile, downloadFile } from '../lib/api.js'
+import { requestJson, downloadFile } from '../lib/api.js'
+import { getDocumentStatusCounts } from '../lib/documents.js'
 import { formatDisplayDate } from '../lib/format.js'
 import { Notice } from './ui.jsx'
 
@@ -81,14 +82,20 @@ export default function DocumentsSection({
   authToken,
   physicalDocuments = {},
   readOnly = false,
+  // Create mode: no member exists yet, so nothing can be fetched or saved.
   stageMode = false,
+  // Edit mode: existing attachments load from the API, but file changes are
+  // staged (uploads + removals) and only committed when the member is saved.
+  deferCommits = false,
   onPendingChange,
 }) {
   const [attachments, setAttachments] = useState(() => [])
-  const [pending, setPending] = useState(() => [])
+  const [pendingUploads, setPendingUploads] = useState(() => [])
+  const [pendingRemovals, setPendingRemovals] = useState(() => [])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [uploadingType, setUploadingType] = useState(null)
+
+  const isStaging = stageMode || deferCommits
 
   useEffect(() => {
     if (stageMode || !memberId) {
@@ -124,45 +131,38 @@ export default function DocumentsSection({
   }, [memberId, authToken, stageMode])
 
   useEffect(() => {
-    if (stageMode) {
-      onPendingChange?.(pending)
+    if (isStaging) {
+      onPendingChange?.({ uploads: pendingUploads, removals: pendingRemovals })
     }
-  }, [pending, stageMode, onPendingChange])
+  }, [pendingUploads, pendingRemovals, isStaging, onPendingChange])
 
-  async function handleUpload(type, event) {
+  function handleAddPending(type, file) {
+    setPendingUploads((current) => [...current, {
+      key: `${type}-${Date.now()}-${Math.random()}`,
+      type,
+      file,
+    }])
+  }
+
+  function handleRemovePending(key) {
+    setPendingUploads((current) => current.filter((item) => item.key !== key))
+  }
+
+  function handleMarkRemoval(attachment) {
+    setPendingRemovals((current) => (current.includes(attachment.id) ? current : [...current, attachment.id]))
+  }
+
+  function handleUndoRemoval(attachmentId) {
+    setPendingRemovals((current) => current.filter((id) => id !== attachmentId))
+  }
+
+  function handleUpload(type, event) {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) {
       return
     }
-
-    if (stageMode) {
-      setPending((current) => [...current, {
-        key: `${type}-${Date.now()}-${Math.random()}`,
-        type,
-        file,
-      }])
-      return
-    }
-
-    if (uploadingType) {
-      return
-    }
-
-    setUploadingType(type)
-    setError('')
-    try {
-      const payload = await uploadFile(`/api/members/${memberId}/documents`, file, authToken, { documentType: type })
-      setAttachments((current) => [payload.attachment, ...current])
-    } catch (uploadError) {
-      setError(uploadError.message)
-    } finally {
-      setUploadingType(null)
-    }
-  }
-
-  function handleRemovePending(key) {
-    setPending((current) => current.filter((item) => item.key !== key))
+    handleAddPending(type, file)
   }
 
   async function handleDownload(attachment) {
@@ -174,19 +174,7 @@ export default function DocumentsSection({
     }
   }
 
-  async function handleDelete(attachment) {
-    if (!window.confirm(`Delete ${attachment.fileName}? This cannot be undone.`)) {
-      return
-    }
-
-    setError('')
-    try {
-      await requestJson(`/api/members/${memberId}/documents/${attachment.id}`, { method: 'DELETE' }, authToken)
-      setAttachments((current) => current.filter((item) => item.id !== attachment.id))
-    } catch (deleteError) {
-      setError(deleteError.message)
-    }
-  }
+  const removingIds = new Set(pendingRemovals)
 
   return (
     <section className="detail-section">
@@ -199,26 +187,36 @@ export default function DocumentsSection({
 
       {loading && !stageMode ? <p className="attachment-note">Loading attachments…</p> : null}
 
-      {stageMode ? (
-        <p className="attachment-note">Digital copies are optional. Files selected here are uploaded after the applicant is saved.</p>
+      {isStaging ? (
+        <p className="attachment-note">
+          {stageMode
+            ? 'Digital copies are optional. Files selected here are uploaded after the applicant is saved.'
+            : 'Digital copies are optional. Files added or removed here are applied when you save changes.'}
+        </p>
       ) : null}
 
       <div className="attachment-list">
         {documentTypeDefinitions.map((definition) => {
           const typeAttachments = attachments.filter((attachment) => attachment.documentType === definition.type)
-          const stagedForType = pending.filter((item) => item.type === definition.type)
+          const keptAttachments = typeAttachments.filter((attachment) => !removingIds.has(attachment.id))
+          const removingAttachments = typeAttachments.filter((attachment) => removingIds.has(attachment.id))
+          const stagedForType = pendingUploads.filter((item) => item.type === definition.type)
           const passedPhysically = Boolean(physicalDocuments[definition.physicalField])
-          const isUploading = uploadingType === definition.type
-          const totalCount = typeAttachments.length + stagedForType.length
+          const counts = getDocumentStatusCounts({
+            attachments,
+            pendingUploads,
+            pendingRemovals,
+            type: definition.type,
+          })
 
           return (
             <div className="attachment-group" key={definition.type}>
               <div className="attachment-group-header">
                 <div className="attachment-group-title">
                   <strong>{definition.label}</strong>
-                  {totalCount > 0 ? (
+                  {counts.totalCount > 0 ? (
                     <span className="attachment-count">
-                      {totalCount} digital {totalCount === 1 ? 'copy' : 'copies'}
+                      {counts.totalCount} digital {counts.totalCount === 1 ? 'copy' : 'copies'}
                     </span>
                   ) : null}
                 </div>
@@ -228,9 +226,9 @@ export default function DocumentsSection({
                 </span>
               </div>
 
-              {typeAttachments.length > 0 ? (
+              {keptAttachments.length > 0 ? (
                 <ul className="attachment-file-list">
-                  {typeAttachments.map((attachment) => {
+                  {keptAttachments.map((attachment) => {
                     const [badgeLabel, badgeKind] = fileBadge(attachment.fileName)
                     return (
                       <li className="attachment-file" key={attachment.id}>
@@ -249,8 +247,37 @@ export default function DocumentsSection({
                             Download
                           </button>
                           {readOnly ? null : (
-                            <button type="button" className="danger-button attachment-action" onClick={() => handleDelete(attachment)}>
-                              Delete
+                            <button type="button" className="danger-button attachment-action" onClick={() => handleMarkRemoval(attachment)}>
+                              Remove
+                            </button>
+                          )}
+                        </span>
+                      </li>
+                    )
+                  })}
+                </ul>
+              ) : null}
+
+              {removingAttachments.length > 0 ? (
+                <ul className="attachment-file-list">
+                  {removingAttachments.map((attachment) => {
+                    const [badgeLabel, badgeKind] = fileBadge(attachment.fileName)
+                    return (
+                      <li className="attachment-file attachment-file-removing" key={attachment.id}>
+                        <span className={`attachment-file-badge attachment-file-badge-${badgeKind}`} aria-hidden="true">
+                          {badgeLabel}
+                        </span>
+                        <span className="attachment-file-main">
+                          <span className="attachment-file-name" title={attachment.fileName}>{attachment.fileName}</span>
+                          <span className="attachment-file-meta">Will be removed when you save changes</span>
+                        </span>
+                        <span className="attachment-file-actions">
+                          <button type="button" className="ghost-button attachment-action" onClick={() => handleDownload(attachment)}>
+                            Download
+                          </button>
+                          {readOnly ? null : (
+                            <button type="button" className="ghost-button attachment-action" onClick={() => handleUndoRemoval(attachment.id)}>
+                              Undo
                             </button>
                           )}
                         </span>
@@ -287,16 +314,15 @@ export default function DocumentsSection({
               ) : null}
 
               {readOnly ? null : (
-                <label className={`file-upload-zone ${isUploading ? 'file-upload-zone-busy' : ''}`}>
+                <label className="file-upload-zone">
                   <span className="file-upload-icon"><UploadIcon /></span>
                   <span className="file-upload-copy">
-                    <strong>{stageMode ? `Add ${definition.label}` : isUploading ? 'Uploading…' : `Upload ${definition.label}`}</strong>
+                    <strong>Add {definition.label}</strong>
                     <small>{definition.acceptHint} · Max 10 MB per file</small>
                   </span>
                   <input
                     type="file"
                     accept={definition.accept}
-                    disabled={stageMode ? false : Boolean(uploadingType)}
                     onChange={(event) => handleUpload(definition.type, event)}
                   />
                 </label>

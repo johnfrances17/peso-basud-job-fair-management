@@ -8,7 +8,7 @@ export default defineConfig({
     include: ['tests/**/*.test.js'],
     testTimeout: 15000,
     hookTimeout: 30000,
-    // Test files share one MySQL database, so run them one at a time.
+    // Test files share one Postgres schema, so run them one at a time.
     fileParallelism: false,
   },
 })

@@ -1432,6 +1432,21 @@ input:disabled {
   border-color: #bfe0cf;
 }
 
+/* Rows staged for removal: still present until the member is saved */
+.attachment-file-removing {
+  background: #fdf3f2;
+  border-color: #e5b3ae;
+}
+
+.attachment-file-removing .attachment-file-name {
+  color: #b42318;
+  text-decoration: line-through;
+}
+
+.attachment-file-removing .attachment-file-badge {
+  opacity: 0.55;
+}
+
 .attachment-file-main {
   flex: 1 1 auto;
   min-width: 0;

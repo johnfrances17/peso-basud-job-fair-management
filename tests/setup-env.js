@@ -1,6 +1,7 @@
 // Must run before server modules are imported so db.js sees the test
 // configuration. dotenv will not override already-set variables, so explicit
 // environment variables (e.g. CI secrets) always win.
+import 'dotenv/config'
 
 // Tests run against a dedicated schema. Every query built by queries.js and
 // app.js is explicitly qualified with this schema (no search_path reliance).
