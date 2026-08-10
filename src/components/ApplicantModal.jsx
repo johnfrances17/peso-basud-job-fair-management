@@ -93,6 +93,8 @@ export default function ApplicantModal({
                   memberId={editingId}
                   authToken={authToken}
                   physicalDocuments={form.documents ?? {}}
+                  deferCommits
+                  onPendingChange={onPendingDocumentsChange}
                 />
               ) : mode === 'create' ? (
                 <DocumentsSection

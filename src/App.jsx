@@ -37,7 +37,7 @@ function App() {
   const [formError, setFormError] = useState('')
   const [modalMode, setModalMode] = useState('create')
   const [activeMember, setActiveMember] = useState(null)
-  const pendingUploadsRef = useRef([])
+  const pendingDocumentsRef = useRef({ uploads: [], removals: [] })
 
   useEffect(() => {
     setForm((current) => {
@@ -223,7 +223,7 @@ function App() {
   }
 
   function openCreateModal() {
-    pendingUploadsRef.current = []
+    pendingDocumentsRef.current = { uploads: [], removals: [] }
     setModalMode('create')
     setActiveMember(null)
     setEditingId(null)
@@ -234,6 +234,7 @@ function App() {
   }
 
   function openMemberDetails(member) {
+    pendingDocumentsRef.current = { uploads: [], removals: [] }
     setModalMode('view')
     setActiveMember(member)
     setEditingId(member.id)
@@ -248,6 +249,7 @@ function App() {
       return
     }
 
+    pendingDocumentsRef.current = { uploads: [], removals: [] }
     setModalMode('edit')
     setActiveMember(member)
     setEditingId(member.id)
@@ -258,7 +260,7 @@ function App() {
   }
 
   function closeModal() {
-    pendingUploadsRef.current = []
+    pendingDocumentsRef.current = { uploads: [], removals: [] }
     setModalOpen(false)
     setEditingId(null)
     setActiveMember(null)
@@ -302,12 +304,13 @@ function App() {
       })
 
       let uploadNote = ''
-      if (!editingId && pendingUploadsRef.current.length > 0) {
-        const staged = pendingUploadsRef.current
-        pendingUploadsRef.current = []
+      const pendingPlan = pendingDocumentsRef.current
+      pendingDocumentsRef.current = { uploads: [], removals: [] }
+
+      if (pendingPlan.uploads.length > 0) {
         let uploadedCount = 0
         const failures = []
-        for (const item of staged) {
+        for (const item of pendingPlan.uploads) {
           try {
             await uploadFile(`/api/members/${nextMember.id}/documents`, item.file, authToken, { documentType: item.type })
             uploadedCount += 1
@@ -320,6 +323,25 @@ function App() {
         }
         if (failures.length > 0) {
           uploadNote += ` ${failures.length} upload${failures.length === 1 ? '' : 's'} failed: ${failures.join('; ')}`
+        }
+      }
+
+      if (pendingPlan.removals.length > 0) {
+        let removedCount = 0
+        const failures = []
+        for (const attachmentId of pendingPlan.removals) {
+          try {
+            await requestJson(`/api/members/${nextMember.id}/documents/${attachmentId}`, { method: 'DELETE' }, authToken)
+            removedCount += 1
+          } catch (removeError) {
+            failures.push(removeError.message)
+          }
+        }
+        if (removedCount > 0) {
+          uploadNote += ` ${removedCount} digital document${removedCount === 1 ? '' : 's'} removed.`
+        }
+        if (failures.length > 0) {
+          uploadNote += ` ${failures.length} removal${failures.length === 1 ? '' : 's'} failed: ${failures.join('; ')}`
         }
       }
 
@@ -342,8 +364,11 @@ function App() {
     setLoginForm((current) => ({ ...current, [field]: value }))
   }
 
-  function handlePendingDocumentsChange(list) {
-    pendingUploadsRef.current = list
+  function handlePendingDocumentsChange(plan) {
+    pendingDocumentsRef.current = {
+      uploads: plan?.uploads ?? [],
+      removals: plan?.removals ?? [],
+    }
   }
 
   let screen = null
