@@ -377,7 +377,8 @@ function App() {
     screen = (
       <div className="auth-shell auth-shell-loading">
         <div className="auth-loading-card panel">
-          <h1>Loading</h1>
+          <span className="spinner spinner-lg" aria-hidden="true" />
+          <h1>Loading…</h1>
         </div>
       </div>
     )
